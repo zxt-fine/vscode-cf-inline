@@ -50,7 +50,7 @@
 - Windows 10 或 Windows 11
 - VS Code `1.85.0` 或更高版本
 - Microsoft Edge
-- Node.js 20 或更高版本（仅源码开发和自行打包需要）
+- Node.js 24 或更高版本（仅源码开发和自行打包需要）
 - 能够访问 Codeforces 的网络环境；如所在网络无法直连，需要可用的系统代理或 VPN
 
 当前版本依赖 Windows 上的 Microsoft Edge 和专用浏览器配置，尚未正式支持 macOS 或 Linux。

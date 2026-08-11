@@ -103,7 +103,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "test": "npm run compile && node --test test/*.test.js",
+    "test": "npm run compile && node test/unit-tests.js",
     "watch": "tsc -w -p ./",
     "package": "vsce package"
   },
