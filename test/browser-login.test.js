@@ -13,6 +13,7 @@ Module._load = function (request, parent, isMain) {
 const {
   buildBrowserArguments,
   buildControlledEdgeAppearanceScript,
+  buildOfficialSubmissionExpression,
   detectCodeforcesAuthentication,
   isPersonalGroupsUrl,
 } = require('../out/browser-login.js');
@@ -127,4 +128,21 @@ test('prechecks common pages with two workers and reuses the first document resp
   assert.match(source, /prefetchedDocuments/);
   assert.match(source, /45_000|45000/);
   assert.match(source, /常用页面预处理完成/);
+});
+
+test('submits through a live official Edge page instead of forging anti-bot parameters', () => {
+  const expression = buildOfficialSubmissionExpression({
+    url: 'https://codeforces.com/contest/1/submit',
+    contestId: '1',
+    index: 'A',
+    programTypeId: '89',
+    source: 'int main() { return 0; }',
+  });
+  assert.match(expression, /window\._ftaa/);
+  assert.match(expression, /window\._bfaa/);
+  assert.match(expression, /new FormData\(form\)/);
+  assert.match(expression, /form\.getAttribute\('action'\)/);
+  assert.match(expression, /credentials: 'include'/);
+  assert.doesNotMatch(expression, /caf4f|adcd1e/);
+  assert.doesNotThrow(() => new Function(expression));
 });

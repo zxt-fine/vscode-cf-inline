@@ -13,9 +13,6 @@ export interface ProblemRef {
 interface SubmitPageInfo {
   csrfToken: string;
   languages: { label: string; value: string }[];
-  hiddenFields: Record<string, string>;
-  formAction: string;
-  actionParameter?: { name: string; prefix: string };
 }
 
 const LANGUAGE_BY_EXTENSION: Record<string, string> = {
@@ -74,41 +71,17 @@ export async function submitCurrentFile(
   }
 
   const pageInfo = parseSubmitPage(pageResp.body.toString('utf8'));
-  const submitTarget = buildResolvedSubmitUrl(submitUrl, pageInfo);
   const language = await pickLanguage(context, fileName, pageInfo.languages);
   if (!language) {
     return;
   }
 
-  const fields: Record<string, string> = { ...pageInfo.hiddenFields };
-  fields['csrf_token'] = pageInfo.csrfToken;
-  fields['action'] = 'submitSolutionFormSubmitted';
-  fields['programTypeId'] = language.value;
-  fields['source'] = source;
-  fields['sourceFile'] = '';
-  fields['sourceSize'] = String(Buffer.byteLength(source, 'utf8'));
-  fields['tabSize'] = '4';
-  if (!fields['submittedProblemCode']) {
-    fields['submittedProblemCode'] = `${problem.contestId}${problem.index}`;
-  }
-  if (!fields['submittedProblemIndex']) {
-    fields['submittedProblemIndex'] = problem.index;
-  }
-
-  const boundary = `----cfInline${Date.now().toString(16)}${Math.random()
-    .toString(16)
-    .slice(2)}`;
-  const body = buildMultipart(fields, boundary);
-  const submitResp = await request({
-    url: submitTarget,
-    method: 'POST',
-    headers: {
-      'Content-Type': `multipart/form-data; boundary=${boundary}`,
-      'Content-Length': String(body.length),
-      Referer: submitTarget,
-    },
-    body,
-    maxRedirects: 8,
+  const submitResp = await proxy.submitSolution({
+    url: buildSubmitUrl(proxy.upstreamOrigin, problem),
+    contestId: problem.contestId,
+    index: problem.index,
+    programTypeId: language.value,
+    source,
   });
 
   const bodyText = submitResp.body.toString('utf8');
@@ -227,10 +200,7 @@ export function parseSubmitPage(html: string): SubmitPageInfo {
   if (!formMatch) {
     throw new Error('未能找到 Codeforces 提交表单，可能页面结构发生了变化。');
   }
-  const formTag = formMatch[1];
   const formHtml = formMatch[2];
-  const formAttrs = parseAttributes(formTag);
-  const formAction = decodeHtmlAttribute(formAttrs['action'] ?? '');
 
   const csrfMeta = html.match(
     /<meta[^>]+name=["']X-Csrf-Token["'][^>]+content=["']([^"']+)["']/i
@@ -258,46 +228,7 @@ export function parseSubmitPage(html: string): SubmitPageInfo {
     }
   }
 
-  const hiddenFields: Record<string, string> = {};
-  const inputTags = formHtml.match(/<input\b[^>]*>/gi) ?? [];
-  for (const tag of inputTags) {
-    const attrs = parseAttributes(tag);
-    const name = attrs['name'];
-    if (name && (attrs['type'] ?? '').toLowerCase() === 'hidden') {
-      hiddenFields[name] = attrs['value'] ?? '';
-    }
-  }
-
-  const ftaa = html.match(/window\._ftaa\s*=\s*["']([^"']+)["']/i)?.[1] ?? '';
-  const bfaa = html.match(/window\._bfaa\s*=\s*["']([^"']+)["']/i)?.[1] ?? '';
-  if (!ftaa || !bfaa) {
-    throw new Error('未能从提交页面提取 Codeforces 浏览器校验字段，请刷新页面后重试。');
-  }
-  hiddenFields['ftaa'] = ftaa;
-  hiddenFields['bfaa'] = bfaa;
-
-  const actionScript = html.match(
-    /\.submitFrameForm["']\)\.each[\s\S]{0,600}?const\s+value\s*=\s*["']([^"']+)["'][\s\S]{0,600}?appendParameterToUrl\([^,]+,\s*["']([^"']+)["']/i
-  );
-  const actionParameter = actionScript
-    ? { prefix: actionScript[1], name: actionScript[2] }
-    : undefined;
-
-  return { csrfToken, languages, hiddenFields, formAction, actionParameter };
-}
-
-export function buildResolvedSubmitUrl(baseSubmitUrl: string, pageInfo: SubmitPageInfo): string {
-  const target = new URL(pageInfo.formAction || baseSubmitUrl, baseSubmitUrl);
-  if (!target.searchParams.has('csrf_token')) {
-    target.searchParams.set('csrf_token', pageInfo.csrfToken);
-  }
-  if (pageInfo.actionParameter) {
-    target.searchParams.set(
-      pageInfo.actionParameter.name,
-      pageInfo.actionParameter.prefix + Math.random().toString(36).slice(2, 11)
-    );
-  }
-  return target.toString();
+  return { csrfToken, languages };
 }
 
 function decodeHtmlAttribute(value: string): string {
@@ -306,16 +237,6 @@ function decodeHtmlAttribute(value: string): string {
     .replace(/&#38;/g, '&')
     .replace(/&quot;/gi, '"')
     .replace(/&#39;|&apos;/gi, "'");
-}
-
-function parseAttributes(tag: string): Record<string, string> {
-  const attrs: Record<string, string> = {};
-  const attrRe = /([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
-  let match: RegExpExecArray | null;
-  while ((match = attrRe.exec(tag))) {
-    attrs[match[1]] = match[2] ?? match[3] ?? match[4] ?? '';
-  }
-  return attrs;
 }
 
 async function pickLanguage(
@@ -364,20 +285,6 @@ async function pickLanguage(
     return undefined;
   }
   return { label: picked.label, value: picked.value };
-}
-
-function buildMultipart(fields: Record<string, string>, boundary: string): Buffer {
-  const parts: Buffer[] = [];
-  for (const [name, value] of Object.entries(fields)) {
-    parts.push(
-      Buffer.from(
-        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`,
-        'utf8'
-      )
-    );
-  }
-  parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
-  return Buffer.concat(parts);
 }
 
 export function extractSubmitError(statusCode: number, body: string): string | undefined {

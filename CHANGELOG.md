@@ -9,6 +9,15 @@
 - CPH 样例导入与运行集成。
 - 公开静态资源的流式混合加速与持久化缓存。
 
+## [0.9.29] - 2026-08-11
+
+### Fixed
+
+- 提交改为在真实 Edge 官方提交页中生成并发送实时反机器人字段，不再伪造旧版 `adcd1e` 参数。
+- 当 Codeforces 要求 Turnstile 或额外反机器人验证时，自动打开普通大小的 Edge 官方提交页，并在验证后复用该页面完成提交。
+- 题目下方提交框、Codeforces 原生提交页和 VS Code 当前文件提交统一使用同一条官方 Edge 提交流程。
+- 长题面或翻译服务破坏公式、代码占位符时，自动切换到分段文本翻译并原位保留受保护内容，不再直接显示占位符不完整错误。
+
 ## [0.9.28] - 2026-08-11
 
 ### Added
@@ -36,5 +45,6 @@
 - 修复窄窗口内容重叠、水平滚动和缩放后布局卡死的问题。
 - 修复 Codeforces 多语言成功消息被误判为提交失败的问题。
 
-[Unreleased]: https://github.com/zxt-fine/vscode-cf-inline/compare/v0.9.28...HEAD
+[Unreleased]: https://github.com/zxt-fine/vscode-cf-inline/compare/v0.9.29...HEAD
+[0.9.29]: https://github.com/zxt-fine/vscode-cf-inline/releases/tag/v0.9.29
 [0.9.28]: https://github.com/zxt-fine/vscode-cf-inline/releases/tag/v0.9.28

@@ -1,7 +1,7 @@
 # Codeforces Inline
 
 [![CI](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml/badge.svg)](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.9.28-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
+[![Version](https://img.shields.io/badge/version-0.9.29-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 一个面向中文竞赛编程用户的 VS Code 扩展：在 VS Code 集成浏览器中浏览 Codeforces，保留英文原题，在原文下方生成独立中文译文，并支持登录、群组、提交和评测结果跟踪。
@@ -42,6 +42,7 @@
 - 每道题目的中文译文下方提供独立提交框，可粘贴代码或读取本地文件。
 - 支持普通比赛、Gym、题库和私有群组题目。
 - 自动读取 Codeforces 当前可用语言，并按文件扩展名或用户偏好选择默认语言。
+- 提交由真实 Edge 官方页面生成实时校验字段；若 Codeforces 临时要求额外验证，会打开普通大小的 Edge 验证页，完成后可直接重试。
 - 提交后持续刷新提交记录，在页面内显示排队、评测中、Accepted、Wrong Answer 等状态。
 - 另提供“提交当前编辑器文件”命令作为可选快捷入口。
 

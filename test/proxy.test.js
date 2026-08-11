@@ -10,6 +10,7 @@ class FakeTransport {
   constructor(handler) {
     this.handler = handler;
     this.requests = [];
+    this.submissions = [];
     this.disposed = false;
     this.alive = true;
   }
@@ -17,6 +18,11 @@ class FakeTransport {
   async request(request) {
     this.requests.push(request);
     return this.handler(request);
+  }
+
+  async submitSolution(request) {
+    this.submissions.push(request);
+    return this.handler({ ...request, method: 'BROWSER_SUBMIT' });
   }
 
   async dispose() {
@@ -464,6 +470,42 @@ test('protects the local translation endpoint from unrelated browser requests', 
     body: Buffer.from('{"items":["Hello"]}', 'utf8'),
   });
   assert.equal(foreignPost.statusCode, 403);
+});
+
+test('routes protected submissions through the official Edge page transport', async (t) => {
+  const transport = new FakeTransport((request) => request.method === 'BROWSER_SUBMIT'
+    ? response('<script>Codeforces.showMessage("Solution to the problem A has been submitted successfully")</script>', 'https://codeforces.com/contest/1/my')
+    : response('<html></html>', request.url));
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/contest/1/problem/A', port: 0 });
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+  const payload = Buffer.from(JSON.stringify({
+    submitPath: '/contest/1/submit',
+    contestId: '1',
+    index: 'A',
+    programTypeId: '89',
+    source: 'int main() { return 0; }',
+  }));
+
+  const rejected = await localRequest(`${proxy.origin}/__cf_inline/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: payload,
+  });
+  assert.equal(rejected.statusCode, 403);
+
+  const accepted = await localRequest(`${proxy.origin}/__cf_inline/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CF-Inline': 'submit' },
+    body: payload,
+  });
+  assert.equal(accepted.statusCode, 200);
+  const result = JSON.parse(accepted.body.toString('utf8'));
+  assert.equal(result.status, 200);
+  assert.equal(transport.submissions.length, 1);
+  assert.equal(transport.submissions[0].url, 'https://codeforces.com/contest/1/submit');
+  assert.equal(transport.submissions[0].source, 'int main() { return 0; }');
 });
 
 test('marks a live session unavailable when Cloudflare challenge returns', async (t) => {

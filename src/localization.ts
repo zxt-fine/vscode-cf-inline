@@ -553,6 +553,47 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       block.removeAttribute('data-cfi-block');
       return block;
     }
+    async function requestTranslationItems(items){
+      var output=[];
+      for(var offset=0;offset<items.length;offset+=32){
+        var batch=items.slice(offset,offset+32);
+        var response=await fetch('/__cf_inline/translate',{method:'POST',headers:{'Content-Type':'application/json','X-CF-Inline':'translate'},body:JSON.stringify({items:batch})});
+        var result=await response.json();
+        if(!response.ok||!Array.isArray(result.items)||result.items.length!==batch.length) throw new Error(result.error||('HTTP '+response.status));
+        output.push.apply(output,result.items);
+      }
+      return output;
+    }
+    async function translateTextNodesSafely(block){
+      var clone=block.cloneNode(true);
+      Array.from(clone.querySelectorAll('.cf-inline-paragraph-toolbar,.cf-inline-paragraph-control,.cf-inline-paragraph-translation')).forEach(function(node){node.remove();});
+      var walker=document.createTreeWalker(clone,NodeFilter.SHOW_TEXT),entries=[],requests=[];
+      while(walker.nextNode()){
+        var node=walker.currentNode,parent=node.parentElement;
+        if(!parent||parent.closest('pre,code,script,style,.MathJax,.MathJax_Preview,mjx-container,.tex-span,[class*="tex-font-style"]'))continue;
+        var raw=node.nodeValue||'',leading=(raw.match(/^\s*/)||[''])[0],trailing=(raw.match(/\s*$/)||[''])[0];
+        var core=raw.slice(leading.length,raw.length-trailing.length);
+        if(!/[A-Za-z]{2}/.test(core))continue;
+        var parts=core.match(/[\s\S]{1,2800}/g)||[];
+        entries.push({node:node,leading:leading,trailing:trailing,count:parts.length});requests.push.apply(requests,parts);
+      }
+      if(!requests.length)return clone;
+      var translations=await requestTranslationItems(requests),cursor=0;
+      entries.forEach(function(entry){entry.node.nodeValue=entry.leading+translations.slice(cursor,cursor+entry.count).join('')+entry.trailing;cursor+=entry.count;});
+      return clone;
+    }
+    async function translateBlockReliably(block,index){
+      var prepared=prepareStatementBlock(block,index);
+      if(prepared.html.length<=4200){
+        try{
+          var translated=(await requestTranslationItems([prepared.html]))[0];
+          return restoreStatementBlock(translated,index,prepared.protectedNodes);
+        }catch(error){
+          if(!/占位符|内容块结构/.test(String(error&&error.message||error)))throw error;
+        }
+      }
+      return translateTextNodesSafely(block);
+    }
     function parseProblemRoute(){
       var parts=location.pathname.split('/').filter(Boolean);
       if(parts[0]==='group'&&parts[2]==='contest'&&parts[4]==='problem'&&parts[1]&&parts[3]&&parts[5]){
@@ -569,20 +610,10 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       }
       return null;
     }
-    function ensureHiddenField(form,name,value){
-      var input=form.querySelector('input[name="'+name+'"]');
-      if(!input){input=document.createElement('input');input.type='hidden';input.name=name;form.appendChild(input);}
-      if(value!==undefined&&value!==null&&String(value)!=='') input.value=String(value);
-      return input;
-    }
-    function secureSubmitAction(form,csrfToken,parameterName,parameterPrefix,baseHref){
-      var target;
-      try{target=new URL(form.getAttribute('action')||baseHref||location.href,baseHref||location.href);}catch(error){target=new URL(baseHref||location.href);}
-      if(csrfToken&&!target.searchParams.has('csrf_token')) target.searchParams.set('csrf_token',csrfToken);
-      var name=parameterName||'adcd1e';
-      if(!target.searchParams.has(name)) target.searchParams.set(name,(parameterPrefix||'caf4f')+Math.random().toString(36).slice(2,11));
-      form.setAttribute('action',target.pathname+target.search+target.hash);
-      return target.pathname+target.search+target.hash;
+    function submitThroughOfficialEdge(payload){
+      return fetch('/__cf_inline/submit',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CF-Inline':'submit'},body:JSON.stringify(payload)}).then(function(response){
+        return response.json().catch(function(){return{};}).then(function(result){if(!response.ok)throw new Error(result.error||('HTTP '+response.status));return result;});
+      });
     }
     function installSubmitFormRepair(){
       if(document.documentElement.dataset.cfInlineSubmitRepair) return;
@@ -590,15 +621,29 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       document.addEventListener('submit',function(event){
         var form=event.target;
         if(!form||!form.matches||!form.matches('form.submit-form')) return;
-        var csrfInput=form.querySelector('input[name="csrf_token"]');
-        var csrfMeta=document.querySelector('meta[name="X-Csrf-Token" i]');
-        var csrf=(csrfInput&&csrfInput.value)||(csrfMeta&&csrfMeta.getAttribute('content'))||'';
-        ensureHiddenField(form,'csrf_token',csrf);
-        ensureHiddenField(form,'ftaa',window._ftaa||'');
-        ensureHiddenField(form,'bfaa',window._bfaa||'');
+        event.preventDefault();event.stopImmediatePropagation();
+        if(form.dataset.cfInlineSubmitting)return;
         var source=form.querySelector('textarea[name="source"]');
-        if(source) ensureHiddenField(form,'sourceSize',String(new TextEncoder().encode(source.value||'').length));
-        secureSubmitAction(form,csrf,'adcd1e','caf4f');
+        var language=form.querySelector('[name="programTypeId"]');
+        var index=form.querySelector('[name="submittedProblemIndex"]');
+        var contest=form.querySelector('[name="contestId"]');
+        var actionUrl;try{actionUrl=new URL(form.getAttribute('action')||location.href,location.href);}catch(error){actionUrl=new URL(location.href);}
+        var pathMatch=actionUrl.pathname.match(new RegExp('^/(?:contest|gym)/(\\\\d+)/submit|^/group/[^/]+/contest/(\\\\d+)/submit','i'));
+        var contestId=String(contest&&contest.value||pathMatch&&(pathMatch[1]||pathMatch[2])||'');
+        var problemIndex=String(index&&index.value||'');
+        var code=String(source&&source.value||'');
+        var programTypeId=String(language&&language.value||'');
+        var status=form.querySelector('.cf-inline-native-submit-status');
+        if(!status){status=document.createElement('div');status.className='cf-inline-submit-status cf-inline-native-submit-status';form.appendChild(status);}
+        if(!contestId||!problemIndex||!programTypeId||!code.trim()){status.className='cf-inline-submit-status cf-inline-native-submit-status is-error';status.textContent='请完整选择题目、语言并填写源代码。';return;}
+        form.dataset.cfInlineSubmitting='1';status.className='cf-inline-submit-status cf-inline-native-submit-status is-loading';status.textContent='正在通过 Edge 官方提交页面完成校验并提交…';
+        Array.from(form.querySelectorAll('button[type="submit"],input[type="submit"]')).forEach(function(button){button.disabled=true;});
+        submitThroughOfficialEdge({submitPath:actionUrl.pathname,contestId:contestId,index:problemIndex,programTypeId:programTypeId,source:code}).then(function(result){
+          var message=readSubmitError(String(result.html||''),Number(result.status||200));if(message)throw new Error(message);
+          status.className='cf-inline-submit-status cf-inline-native-submit-status is-success';status.textContent='Codeforces 已接收代码，请在提交记录中查看评测结果。';
+        }).catch(function(error){status.className='cf-inline-submit-status cf-inline-native-submit-status is-error';status.textContent='提交失败：'+String(error&&error.message||error);}).finally(function(){
+          delete form.dataset.cfInlineSubmitting;Array.from(form.querySelectorAll('button[type="submit"],input[type="submit"]')).forEach(function(button){button.disabled=false;});
+        });
       },true);
     }
     function readSampleText(pre){
@@ -638,23 +683,6 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         });
         title.appendChild(button);
       });
-    }
-    function extractWindowValue(html,name){
-      var marker='window._'+name;
-      var start=html.indexOf(marker);
-      while(start!==-1){
-        var equals=html.indexOf('=',start+marker.length);
-        if(equals===-1) return '';
-        var quoteIndex=equals+1;
-        while(quoteIndex<html.length&&html.charAt(quoteIndex)!=='"'&&html.charAt(quoteIndex)!=="'") quoteIndex++;
-        if(quoteIndex<html.length){
-          var quote=html.charAt(quoteIndex);
-          var end=html.indexOf(quote,quoteIndex+1);
-          if(end!==-1) return html.slice(quoteIndex+1,end);
-        }
-        start=html.indexOf(marker,start+marker.length);
-      }
-      return '';
     }
     function cleanSubmitMessage(value){
       return String(value||'').replace(/\\s+/g,' ').trim();
@@ -789,16 +817,6 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         if(!sourceForm) throw new Error(sourceDoc.querySelector('#enterForm')?'登录状态已失效，请重新连接 Edge 会话。':'未找到 Codeforces 提交表单，当前比赛可能不允许提交。');
         var sourceLanguage=sourceForm.querySelector('select[name="programTypeId"]');
         if(!sourceLanguage||!sourceLanguage.options.length) throw new Error('未能读取 Codeforces 的提交语言列表。');
-        var csrfInput=sourceForm.querySelector('input[name="csrf_token"]');
-        var csrfMeta=sourceDoc.querySelector('meta[name="X-Csrf-Token" i]');
-        var csrf=(csrfInput&&csrfInput.value)||(csrfMeta&&csrfMeta.getAttribute('content'))||'';
-        if(!csrf) throw new Error('未能读取 CSRF 校验信息，请刷新题目页面后重试。');
-        var ftaa=extractWindowValue(result.html,'ftaa');
-        var bfaa=extractWindowValue(result.html,'bfaa');
-        if(!ftaa||!bfaa) throw new Error('未能读取 Codeforces 浏览器校验字段，请刷新后重试。');
-        var actionHolder=document.createElement('form');
-        actionHolder.setAttribute('action',sourceForm.getAttribute('action')||route.submitPath);
-        var submitAction=secureSubmitAction(actionHolder,csrf,'adcd1e','caf4f',new URL(route.submitPath,location.origin).href);
         var form=document.createElement('form');form.className='cf-inline-submit-form';form.noValidate=true;
         var languageRow=document.createElement('label');languageRow.className='cf-inline-submit-row';
         var languageLabel=document.createElement('span');languageLabel.textContent='语言';
@@ -829,21 +847,12 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           var source=textarea.value||'';
           if(!source.trim()){status.className='cf-inline-submit-status is-error';status.textContent='请先粘贴代码或选择代码文件。';textarea.focus();return;}
           submit.disabled=true;language.disabled=true;file.disabled=true;status.className='cf-inline-submit-status is-loading';status.textContent='正在提交到 Codeforces，请稍候…';
-          var data=new FormData();
-          Array.from(sourceForm.querySelectorAll('input[type="hidden"][name]')).forEach(function(input){data.append(input.name,input.value||'');});
-          data.set('csrf_token',csrf);data.set('ftaa',ftaa);data.set('bfaa',bfaa);
-          data.set('action','submitSolutionFormSubmitted');data.set('contestId',route.contestId);
-          data.set('submittedProblemIndex',route.index);data.set('submittedProblemCode',route.contestId+route.index);
-          data.set('programTypeId',language.value);data.set('source',source);data.set('sourceFile','');
-          data.set('sourceSize',String(new TextEncoder().encode(source).length));data.set('tabSize','4');
           var sequence=++activeSubmissionSequence;
           readLatestSubmission(route).catch(function(){return null;}).then(function(previous){
-            return fetch(submitAction,{method:'POST',body:data,credentials:'same-origin',redirect:'follow'}).then(function(response){
-              return response.text().then(function(html){return {response:{ok:response.ok,status:response.status,url:response.url,html:html},previousId:previous&&previous.id||''};});
-            });
+            return submitThroughOfficialEdge({submitPath:route.submitPath,contestId:route.contestId,index:route.index,programTypeId:language.value,source:source}).then(function(response){return {response:response,previousId:previous&&previous.id||''};});
           }).then(function(result){
             var response=result.response;
-            var message=readSubmitError(response.html,response.status);if(message) throw new Error(message);
+            var message=readSubmitError(String(response.html||''),Number(response.status||200));if(message) throw new Error(message);
             status.className='cf-inline-submit-status is-loading';status.textContent='Codeforces 已接收代码，正在等待评测结果…';
             pollSubmissionResult(route,result.previousId,status,sequence,function(value){return value===activeSubmissionSequence;});
           }).catch(function(error){status.className='cf-inline-submit-status is-error';status.textContent='提交失败：'+String(error&&error.message||error);}).finally(function(){submit.disabled=false;language.disabled=false;file.disabled=false;});
@@ -897,11 +906,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           try{
             translation.classList.remove('is-error');
             var index=paragraphTranslationSequence++;
-            var prepared=prepareStatementBlock(block,index);
-            var response=await fetch('/__cf_inline/translate',{method:'POST',headers:{'Content-Type':'application/json','X-CF-Inline':'translate'},body:JSON.stringify({items:[prepared.html]})});
-            var result=await response.json();
-            if(!response.ok||!Array.isArray(result.items)||!result.items[0]) throw new Error(result.error||('HTTP '+response.status));
-            var translatedBlock=restoreStatementBlock(result.items[0],index,prepared.protectedNodes);
+            var translatedBlock=await translateBlockReliably(block,index);
             translatedBlock.removeAttribute('id');
             translatedBlock.querySelectorAll('[id]').forEach(function(node){node.removeAttribute('id');});
             Array.from(translatedBlock.querySelectorAll('.cf-inline-paragraph-toolbar,.cf-inline-paragraph-control,.cf-inline-paragraph-translation')).forEach(function(node){node.remove();});
@@ -943,18 +948,16 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         }
         busy=true; button.disabled=true; status.textContent='正在生成独立中文译文，请稍候…';
         try{
-          var prepared=[],requestBlocks=[];
+          var prepared=[];
           blocks.forEach(function(block,index){
             if(block.classList.contains('sample-tests')) return;
-            var item=prepareStatementBlock(block,index);
-            if(/[A-Za-z]{2}/.test(item.html)){prepared.push({index:index,item:item});requestBlocks.push(item.html);}
+            if(/[A-Za-z]{2}/.test(block.textContent||''))prepared.push({index:index,block:block});
           });
-          if(!requestBlocks.length) throw new Error('当前题面不需要翻译');
-          var response=await fetch('/__cf_inline/translate',{method:'POST',headers:{'Content-Type':'application/json','X-CF-Inline':'translate'},body:JSON.stringify({items:requestBlocks})});
-          var result=await response.json();
-          if(!response.ok||!Array.isArray(result.items)) throw new Error(result.error||('HTTP '+response.status));
+          if(!prepared.length) throw new Error('当前题面不需要翻译');
           var translatedByIndex=new Map();
-          prepared.forEach(function(entry,resultIndex){translatedByIndex.set(entry.index,restoreStatementBlock(result.items[resultIndex],entry.index,entry.item.protectedNodes));});
+          var nextPrepared=0;
+          async function worker(){while(nextPrepared<prepared.length){var entry=prepared[nextPrepared++];translatedByIndex.set(entry.index,await translateBlockReliably(entry.block,entry.index));}}
+          await Promise.all([worker(),worker()]);
           translatedWrap=document.createElement('section'); translatedWrap.className='cf-inline-translated-wrap';
           var heading=document.createElement('div'); heading.className='cf-inline-translated-heading'; heading.textContent='中文翻译';
           var translatedStatement=document.createElement('div'); translatedStatement.className='problem-statement cf-inline-translated-statement';

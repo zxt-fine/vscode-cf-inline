@@ -9,7 +9,6 @@ Module._load = function (request, parent, isMain) {
 };
 
 const {
-  buildResolvedSubmitUrl,
   buildSubmitUrl,
   extractSubmitError,
   isSubmitSuccessMessage,
@@ -45,21 +44,11 @@ const submitPage = `<!doctype html><html><head>
   </script>
 </body></html>`;
 
-test('reconstructs Codeforces browser-generated submit fields and action parameters', () => {
+test('parses language choices without trusting raw anti-bot placeholders', () => {
   const parsed = parseSubmitPage(submitPage);
   assert.equal(parsed.csrfToken, 'csrf-value');
-  assert.equal(parsed.hiddenFields.ftaa, 'ftaa-browser-value');
-  assert.equal(parsed.hiddenFields.bfaa, 'bfaa-browser-value');
   assert.deepEqual(parsed.languages.map((item) => item.value), ['54', '89']);
-
-  const target = new URL(buildResolvedSubmitUrl(
-    'http://127.0.0.1:45678/contest/1/submit/A',
-    parsed
-  ));
-  assert.equal(target.pathname, '/contest/1/submit/A');
-  assert.equal(target.searchParams.get('csrf_token'), 'csrf-value');
-  assert.equal(target.searchParams.get('from'), 'browser');
-  assert.match(target.searchParams.get('adcd1e'), /^caf4f[a-z0-9]{1,9}$/);
+  assert.doesNotThrow(() => parseSubmitPage(submitPage.replace('ftaa-browser-value', 'n/a').replace('bfaa-browser-value', 'n/a')));
 });
 
 test('does not report success when Codeforces returns the submit form with an error', () => {

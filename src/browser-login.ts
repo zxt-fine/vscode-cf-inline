@@ -16,6 +16,7 @@ import {
 import { request as directHttpRequest } from './net';
 import {
   BrowserCookie,
+  CfBrowserSubmissionRequest,
   CfProxy,
   CfTransportRequest,
   CfTransportResponse,
@@ -499,6 +500,20 @@ interface BrowserFetchResult {
   finalUrl?: string;
 }
 
+interface SubmissionPageState {
+  url?: string;
+  title?: string;
+  readyState?: string;
+  hasForm?: boolean;
+  ftaa?: string;
+  bfaa?: string;
+  action?: string;
+  turnstileRequired?: boolean;
+  turnstileToken?: string;
+  loginRequired?: boolean;
+  challenged?: boolean;
+}
+
 const MAX_CONCURRENT_BROWSER_REQUESTS = 12;
 
 interface BrowserRequestWaiter {
@@ -517,6 +532,7 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
   private readonly requestWaiters: BrowserRequestWaiter[] = [];
   private readonly prefetchedDocuments = new Map<string, PrefetchedDocument>();
   private reconnectPromise: Promise<void> | undefined;
+  private submissionInProgress = false;
 
   constructor(
     private readonly browserProcess: ChildProcess,
@@ -660,6 +676,142 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
       );
       return { statusCode: response.statusCode, body: response.body };
     });
+  }
+
+  async submitSolution(request: CfBrowserSubmissionRequest): Promise<CfTransportResponse> {
+    if (this.disposed || !this.isAlive()) {
+      throw new Error('Edge 浏览器会话已关闭，无法提交代码');
+    }
+    const submitUrl = new URL(request.url);
+    if (!isCodeforcesHost(submitUrl.hostname)) {
+      throw new Error(`拒绝向非 Codeforces 地址提交代码：${submitUrl.hostname}`);
+    }
+    if (this.submissionInProgress) {
+      throw new Error('已有一份代码正在提交，请等待当前提交完成');
+    }
+    this.submissionInProgress = true;
+    let requestSlotAcquired = false;
+    let temporaryTargetId: string | undefined;
+    let temporaryClient: CdpClient | undefined;
+    let submissionClient: CdpClient | undefined;
+    try {
+      await this.acquireRequestSlot(100);
+      requestSlotAcquired = true;
+      const primaryState = await readOfficialSubmitPageState(this.pageClient).catch(
+        (): SubmissionPageState => ({})
+      );
+      let primaryPath = '';
+      try {
+        primaryPath = primaryState.url ? new URL(primaryState.url).pathname : '';
+      } catch {
+        primaryPath = '';
+      }
+      if (primaryPath === submitUrl.pathname && primaryState.hasForm) {
+        submissionClient = this.pageClient;
+      } else {
+        const created = (await this.browserClient.send('Target.createTarget', {
+          url: 'about:blank',
+          background: true,
+        })) as { targetId?: string };
+        temporaryTargetId = created.targetId;
+        if (!temporaryTargetId) {
+          throw new Error('Edge 未能创建官方提交页面');
+        }
+        const target = await waitForDevToolsTarget(this.debuggerPort, temporaryTargetId);
+        if (!target.webSocketDebuggerUrl) {
+          throw new Error('Edge 官方提交页面缺少调试连接');
+        }
+        temporaryClient = await CdpClient.connect(target.webSocketDebuggerUrl);
+        submissionClient = temporaryClient;
+        await submissionClient.send('Page.enable');
+        await submissionClient.send('Page.navigate', { url: submitUrl.toString() }, 60_000);
+      }
+      const state = await waitForOfficialSubmitPage(submissionClient, 30_000);
+      if (state.loginRequired) {
+        throw new Error('Codeforces 登录状态已失效，请重新登录后提交');
+      }
+      if (state.challenged) {
+        await this.revealSubmissionVerification(submitUrl.toString());
+        throw new Error('Codeforces 要求完成反机器人验证；已在 Edge 中打开验证页面，请完成后重新提交');
+      }
+      if (!state.hasForm) {
+        throw new Error('Codeforces 官方提交页面未找到提交表单');
+      }
+      if (state.turnstileRequired && !state.turnstileToken) {
+        await this.revealSubmissionVerification(submitUrl.toString());
+        throw new Error('Codeforces 提交页要求反机器人验证；已在 Edge 中打开验证页面，请完成后重新提交');
+      }
+      if (!isLiveAntiBotValue(state.ftaa) || !isLiveAntiBotValue(state.bfaa)) {
+        await this.revealSubmissionVerification(submitUrl.toString());
+        throw new Error('Codeforces 官方反机器人字段尚未生成；已在 Edge 中打开提交页，请等待页面完成验证后重试');
+      }
+      const evaluated = (await submissionClient.send(
+        'Runtime.evaluate',
+        {
+          expression: buildOfficialSubmissionExpression(request),
+          awaitPromise: true,
+          returnByValue: true,
+        },
+        90_000
+      )) as RuntimeEvaluationResult;
+      if (evaluated.exceptionDetails) {
+        throw new Error(evaluated.exceptionDetails.text ?? 'Edge 官方页面提交执行失败');
+      }
+      const result = evaluated.result?.value;
+      if (!result) {
+        throw new Error('Edge 官方提交页面没有返回结果');
+      }
+      if (result.error) {
+        throw new Error(result.error);
+      }
+      if (
+        result.status === undefined ||
+        !result.headers ||
+        result.bodyBase64 === undefined ||
+        !result.finalUrl
+      ) {
+        throw new Error('Edge 官方提交页面返回了不完整的结果');
+      }
+      const responseBody = Buffer.from(result.bodyBase64, 'base64');
+      if (/Please complete (?:the )?anti-bot verification/i.test(responseBody.toString('utf8'))) {
+        await this.revealSubmissionVerification(submitUrl.toString());
+        throw new Error('Codeforces 仍要求反机器人验证；已在 Edge 中打开官方提交页，请完成验证后重新提交');
+      }
+      return {
+        statusCode: result.status,
+        headers: result.headers,
+        body: responseBody,
+        finalUrl: result.finalUrl,
+      };
+    } finally {
+      temporaryClient?.close();
+      if (temporaryTargetId) {
+        try {
+          await this.browserClient.send('Target.closeTarget', { targetId: temporaryTargetId });
+        } catch {
+          // The temporary tab may already have closed after a successful submit.
+        }
+      }
+      if (requestSlotAcquired) {
+        this.releaseRequestSlot();
+      }
+      this.submissionInProgress = false;
+    }
+  }
+
+  private async revealSubmissionVerification(url: string): Promise<void> {
+    try {
+      await this.pageClient.send('Page.navigate', { url }, 30_000);
+      const windowInfo = (await this.browserClient.send('Browser.getWindowForTarget', {
+        targetId: this.targetId,
+      })) as { windowId: number };
+      await this.browserClient.send('Browser.setWindowBounds', {
+        windowId: windowInfo.windowId,
+        bounds: { windowState: 'normal', left: 80, top: 50, width: 1200, height: 800 },
+      });
+    } catch {
+      // Keep the original verification error if Edge cannot be brought forward.
+    }
   }
 
   private async requestOnce(
@@ -994,6 +1146,93 @@ function buildFetchExpression(payload: {
   })()`;
 }
 
+export function buildOfficialSubmissionExpression(request: CfBrowserSubmissionRequest): string {
+  const payload = JSON.stringify({
+    url: request.url,
+    contestId: request.contestId,
+    index: request.index,
+    programTypeId: request.programTypeId,
+    sourceBase64: Buffer.from(request.source, 'utf8').toString('base64'),
+  });
+  return `(async () => {
+    try {
+      const request = ${payload};
+      const form = document.querySelector('form.submit-form');
+      if (!form) return { error: 'Codeforces 官方提交表单不存在' };
+      const sourceBytes = Uint8Array.from(atob(request.sourceBase64), (char) => char.charCodeAt(0));
+      const source = new TextDecoder().decode(sourceBytes);
+      const ftaa = String(window._ftaa || '');
+      const bfaa = String(window._bfaa || '');
+      const turnstile = document.querySelector('[name="turnstileToken"],[name="cf-turnstile-response"]');
+      const live = (value) => value && !/^(?:n\\/?a|null|undefined|0+)$/i.test(value);
+      if (!live(ftaa) || !live(bfaa)) {
+        return { error: 'Codeforces 官方反机器人字段尚未生成，请在 Edge 中完成验证后重试' };
+      }
+      const setField = (name, value) => {
+        let control = form.querySelector('[name="' + name + '"]');
+        if (!control) {
+          control = document.createElement('input');
+          control.type = 'hidden';
+          control.name = name;
+          form.appendChild(control);
+        }
+        control.value = String(value);
+      };
+      const csrf = form.querySelector('input[name="csrf_token"]')?.value
+        || document.querySelector('meta[name="X-Csrf-Token" i]')?.getAttribute('content')
+        || '';
+      if (!csrf) return { error: 'Codeforces 官方提交页缺少 CSRF 校验信息' };
+      setField('csrf_token', csrf);
+      setField('ftaa', ftaa);
+      setField('bfaa', bfaa);
+      setField('action', 'submitSolutionFormSubmitted');
+      setField('contestId', request.contestId);
+      setField('submittedProblemIndex', request.index);
+      setField('submittedProblemCode', request.contestId + request.index);
+      setField('programTypeId', request.programTypeId);
+      setField('source', source);
+      setField('sourceSize', String(sourceBytes.length));
+      setField('tabSize', '4');
+      const target = new URL(form.getAttribute('action') || request.url, location.href);
+      if (!target.searchParams.has('csrf_token')) target.searchParams.set('csrf_token', csrf);
+      const data = new FormData(form);
+      data.set('csrf_token', csrf);
+      data.set('ftaa', ftaa);
+      data.set('bfaa', bfaa);
+      data.set('action', 'submitSolutionFormSubmitted');
+      data.set('contestId', request.contestId);
+      data.set('submittedProblemIndex', request.index);
+      data.set('submittedProblemCode', request.contestId + request.index);
+      data.set('programTypeId', request.programTypeId);
+      data.set('source', source);
+      data.set('sourceFile', '');
+      data.set('sourceSize', String(sourceBytes.length));
+      data.set('tabSize', '4');
+      if (turnstile && turnstile.name && turnstile.value) data.set(turnstile.name, turnstile.value);
+      const response = await fetch(target.href, {
+        method: 'POST',
+        body: data,
+        credentials: 'include',
+        redirect: 'follow',
+        cache: 'no-store'
+      });
+      const buffer = new Uint8Array(await response.arrayBuffer());
+      let binary = '';
+      for (let offset = 0; offset < buffer.length; offset += 32768) {
+        binary += String.fromCharCode(...buffer.subarray(offset, offset + 32768));
+      }
+      return {
+        status: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+        bodyBase64: btoa(binary),
+        finalUrl: response.url
+      };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  })()`;
+}
+
 function sanitizeFetchHeaders(headers: Record<string, string>): Record<string, string> {
   const sanitized: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
@@ -1152,6 +1391,86 @@ async function waitForCodeforcesPageTarget(port: number): Promise<DevToolsTarget
     await delay(250);
   }
   throw new Error('已登录，但未找到可用的 Codeforces Edge 页面。');
+}
+
+async function waitForDevToolsTarget(port: number, targetId: string): Promise<DevToolsTarget> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try {
+      const targets = await getJson<DevToolsTarget[]>(`http://127.0.0.1:${port}/json/list`);
+      const target = targets.find(
+        (item) => item.id === targetId && item.type === 'page' && !!item.webSocketDebuggerUrl
+      );
+      if (target) {
+        return target;
+      }
+    } catch {
+      // The temporary target may not be exposed by the debugger yet.
+    }
+    await delay(100);
+  }
+  throw new Error('Edge 临时提交页面启动超时');
+}
+
+async function waitForOfficialSubmitPage(
+  client: CdpClient,
+  timeoutMs: number
+): Promise<SubmissionPageState> {
+  const deadline = Date.now() + timeoutMs;
+  let lastState: SubmissionPageState = {};
+  while (Date.now() < deadline) {
+    try {
+      lastState = await readOfficialSubmitPageState(client);
+      if (lastState.loginRequired || lastState.challenged) {
+        return lastState;
+      }
+      if (
+        lastState.readyState === 'complete' &&
+        lastState.hasForm &&
+        isLiveAntiBotValue(lastState.ftaa) &&
+        isLiveAntiBotValue(lastState.bfaa) &&
+        (!lastState.turnstileRequired || !!lastState.turnstileToken) &&
+        !!lastState.action
+      ) {
+        return lastState;
+      }
+    } catch (error) {
+      if (!isTransientExecutionContextError(error)) {
+        throw error;
+      }
+    }
+    await delay(150);
+  }
+  return lastState;
+}
+
+async function readOfficialSubmitPageState(client: CdpClient): Promise<SubmissionPageState> {
+  const evaluated = (await client.send('Runtime.evaluate', {
+    expression: `(() => {
+      const form = document.querySelector('form.submit-form');
+      const text = (document.body && document.body.innerText || '').slice(0, 12000);
+      const turnstile = document.querySelector('[name="turnstileToken"],[name="cf-turnstile-response"]');
+      return {
+        url: location.href,
+        title: document.title,
+        readyState: document.readyState,
+        hasForm: !!form,
+        ftaa: String(window._ftaa || ''),
+        bfaa: String(window._bfaa || ''),
+        action: form ? form.action : '',
+        turnstileRequired: !!document.querySelector('.cf-turnstile,iframe[src*="turnstile"]'),
+        turnstileToken: String(turnstile && turnstile.value || ''),
+        loginRequired: /^\\/enter(?:\\/|$)/i.test(location.pathname) || !!document.querySelector('#enterForm'),
+        challenged: /Just a moment|Checking your browser|请稍候/i.test(document.title) || /cf-chl-|challenge-platform|complete the anti-bot verification/i.test(text)
+      };
+    })()`,
+    returnByValue: true,
+  })) as { result?: { value?: SubmissionPageState } };
+  return evaluated.result?.value ?? {};
+}
+
+function isLiveAntiBotValue(value: string | undefined): boolean {
+  return !!value && !/^(?:n\/?a|null|undefined|0+)$/i.test(value.trim());
 }
 
 async function findEdgeExecutable(): Promise<string | undefined> {

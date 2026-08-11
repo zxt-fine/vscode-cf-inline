@@ -62,9 +62,13 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /test-example-line/);
   assert.match(script, /cf-inline-submit-wrap/);
   assert.match(script, /group.*contest.*problem/);
-  assert.match(script, /ftaa/);
-  assert.match(script, /bfaa/);
-  assert.match(script, /adcd1e/);
+  assert.match(script, /submitThroughOfficialEdge/);
+  assert.match(script, /__cf_inline\/submit/);
+  assert.match(script, /X-CF-Inline':'submit/);
+  assert.doesNotMatch(script, /caf4f|adcd1e/);
+  assert.match(script, /translateTextNodesSafely/);
+  assert.match(script, /prepared\.html\.length<=4200/);
+  assert.match(script, /占位符\|内容块结构/);
   assert.match(script, /提交到 Codeforces/);
   assert.match(script, /cleanSubmitMessage/);
   assert.match(script, /isSubmitSuccessMessage/);

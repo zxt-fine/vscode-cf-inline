@@ -56,9 +56,18 @@ export interface CfTransportResponse {
   finalUrl: string;
 }
 
+export interface CfBrowserSubmissionRequest {
+  url: string;
+  contestId: string;
+  index: string;
+  programTypeId: string;
+  source: string;
+}
+
 export interface CfUpstreamTransport {
   request(request: CfTransportRequest): Promise<CfTransportResponse>;
   translateHtmlItems?(items: string[]): Promise<string[]>;
+  submitSolution?(request: CfBrowserSubmissionRequest): Promise<CfTransportResponse>;
   dispose(): Promise<void>;
   isAlive?(): boolean;
 }
@@ -165,6 +174,17 @@ export class CfProxy extends EventEmitter {
 
   isSessionReady(): boolean {
     return this.sessionReady && !!this.transport && (this.transport.isAlive?.() ?? true);
+  }
+
+  async submitSolution(request: CfBrowserSubmissionRequest): Promise<CfTransportResponse> {
+    const transport = this.transport;
+    if (!this.isSessionReady() || !transport) {
+      throw new Error('请先连接并验证 Codeforces Edge 会话');
+    }
+    if (!transport.submitSolution) {
+      throw new Error('当前 Edge 会话不支持官方页面提交，请重新登录后重试');
+    }
+    return transport.submitSolution(request);
   }
 
   setLoginProgress(inProgress: boolean, message = ''): void {
@@ -302,6 +322,10 @@ export class CfProxy extends EventEmitter {
       const rawUrl = req.url ?? '/';
       if (new URL(rawUrl, this.origin).pathname === '/__cf_inline/translate') {
         await this.handleTranslation(req, res);
+        return;
+      }
+      if (new URL(rawUrl, this.origin).pathname === '/__cf_inline/submit') {
+        await this.handleBrowserSubmission(req, res);
         return;
       }
       if (rawUrl.startsWith('/__cf_inline/')) {
@@ -731,6 +755,71 @@ export class CfProxy extends EventEmitter {
       }
       const items = await this.transport.translateHtmlItems(payload.items as string[]);
       this.writeJson(res, { items });
+    } catch (err) {
+      this.writeJson(
+        res,
+        { error: err instanceof Error ? err.message : String(err) },
+        502
+      );
+    }
+  }
+
+  private async handleBrowserSubmission(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    if (req.method !== 'POST') {
+      this.writeJson(res, { error: '提交接口仅接受 POST 请求' }, 405);
+      return;
+    }
+    if (req.headers['x-cf-inline'] !== 'submit') {
+      this.writeJson(res, { error: '无效的代码提交请求' }, 403);
+      return;
+    }
+    try {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of req) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += bytes.length;
+        if (size > 2 * 1024 * 1024) {
+          throw new Error('待提交的源代码过长');
+        }
+        chunks.push(bytes);
+      }
+      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+        submitPath?: unknown;
+        contestId?: unknown;
+        index?: unknown;
+        programTypeId?: unknown;
+        source?: unknown;
+      };
+      if (
+        typeof payload.submitPath !== 'string' ||
+        !isAllowedSubmitPath(payload.submitPath) ||
+        typeof payload.contestId !== 'string' ||
+        !/^\d+$/.test(payload.contestId) ||
+        typeof payload.index !== 'string' ||
+        !/^[A-Za-z0-9]+$/.test(payload.index) ||
+        typeof payload.programTypeId !== 'string' ||
+        !/^\d+$/.test(payload.programTypeId) ||
+        typeof payload.source !== 'string' ||
+        !payload.source.trim()
+      ) {
+        throw new Error('代码提交参数无效');
+      }
+      const response = await this.submitSolution({
+        url: new URL(payload.submitPath, this.baseUrl).toString(),
+        contestId: payload.contestId,
+        index: payload.index,
+        programTypeId: payload.programTypeId,
+        source: payload.source,
+      });
+      this.writeJson(res, {
+        status: response.statusCode,
+        url: response.finalUrl,
+        html: response.body.toString('utf8'),
+      });
     } catch (err) {
       this.writeJson(
         res,
@@ -1197,6 +1286,18 @@ function detectAuthenticationState(html: string, finalUrl: string): Authenticati
     return 'authenticated';
   }
   return 'unknown';
+}
+
+function isAllowedSubmitPath(value: string): boolean {
+  let pathname: string;
+  try {
+    pathname = new URL(value, 'https://codeforces.com').pathname;
+  } catch {
+    return false;
+  }
+  return /^(?:\/contest\/\d+\/submit|\/gym\/\d+\/submit|\/problemset\/submit|\/group\/[A-Za-z0-9_-]+\/contest\/\d+\/submit)\/?$/i.test(
+    pathname
+  );
 }
 
 function parseAttributes(tag: string): Record<string, string> {

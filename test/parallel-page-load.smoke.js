@@ -87,10 +87,7 @@ async function main() {
       const inlineSubmit = rendered.pageState?.inlineSubmit;
       if (!inlineSubmit?.success
         || inlineSubmit.languageCount < 2
-        || inlineSubmit.nativeFtaa !== 'native-ftaa'
-        || inlineSubmit.nativeBfaa !== 'native-bfaa'
-        || !inlineSubmit.nativeAction.includes('csrf_token=native-csrf')
-        || !inlineSubmit.nativeAction.includes('adcd1e=caf4f')) {
+        || !inlineSubmit.nativeSuccess) {
         throw new Error(`Synthetic submit UI or native form repair failed: ${JSON.stringify(inlineSubmit)}`);
       }
       const responsive = rendered.pageState?.responsive;
@@ -107,14 +104,12 @@ async function main() {
         throw new Error(`Responsive Codeforces layout failed: ${JSON.stringify(responsive)}`);
       }
       const submitted = session.transport.submissions;
-      if (submitted.length !== 1
-        || !submitted[0].url.includes('/group/test-group/contest/123/submit')
-        || !submitted[0].url.includes('csrf_token=csrf-value')
-        || !submitted[0].url.includes('adcd1e=caf4f')
-        || !submitted[0].body.includes('ftaa-browser-value')
-        || !submitted[0].body.includes('bfaa-browser-value')
-        || !submitted[0].body.includes('submittedProblemIndex')
-        || !submitted[0].body.includes('int main()')) {
+      if (submitted.length !== 2
+        || !submitted.every((item) => item.url.includes('/group/test-group/contest/123/submit'))
+        || submitted[0].index !== 'A'
+        || submitted[0].programTypeId !== '89'
+        || !submitted[0].source.includes('int main()')
+        || submitted[1].source !== 'abc') {
         throw new Error(`Synthetic submit request was incomplete: ${JSON.stringify(submitted)}`);
       }
     }
@@ -180,6 +175,10 @@ function syntheticSession() {
         .replace('ICPC Challenge powered by Huawei', 'ICPC 挑战赛由华为提供支持')
         .replace('By ICPCNews, 9 days ago.', '由 ICPCNews 发布，9 天前。')
         .replace(/ data-cfi-protected="\d+"/g, '')),
+      submitSolution: async (request) => {
+        submissions.push(request);
+        return { statusCode: 200, headers: { 'content-type': 'text/html; charset=UTF-8' }, body: Buffer.from('<script>Codeforces.showMessage("Solution to the problem A has been submitted successfully")</script>', 'utf8'), finalUrl: 'https://codeforces.com/group/test-group/contest/123/my' };
+      },
       request: async (request) => {
         const target = new URL(request.url);
         if (target.pathname === '/group/test-group/contest/123/submit' && request.method === 'GET') {
@@ -363,21 +362,19 @@ async function renderInEdge(url) {
                 if (!inlineForm) return { success: false, error: document.querySelector('.cf-inline-submit-wrap')?.innerText || 'missing inline form' };
                 inlineForm.querySelector('textarea[name="source"]').value = 'int main() { return 0; }';
                 inlineForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-                while (!document.querySelector('.cf-inline-submit-status.is-success') && !document.querySelector('.cf-inline-submit-status.is-error') && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+                while (!/Codeforces 已接收代码/.test(document.querySelector('.cf-inline-submit-status')?.textContent || '') && !document.querySelector('.cf-inline-submit-status.is-error') && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
                 const native = document.createElement('form'); native.className = 'submit-form'; native.action = '/group/test-group/contest/123/submit';
-                native.innerHTML = '<input type="hidden" name="csrf_token" value="native-csrf"><input type="hidden" name="ftaa" value=""><input type="hidden" name="bfaa" value=""><textarea name="source">abc</textarea>';
+                native.innerHTML = '<input type="hidden" name="contestId" value="123"><input type="hidden" name="submittedProblemIndex" value="A"><select name="programTypeId"><option value="89" selected>GNU G++20</option></select><textarea name="source">abc</textarea><button type="submit">Submit</button>';
                 document.body.appendChild(native);
-                const globals = document.createElement('script'); globals.textContent = 'window._ftaa="native-ftaa";window._bfaa="native-bfaa";'; document.body.appendChild(globals);
-                let snapshot = null;
-                document.addEventListener('submit', (event) => { if (event.target === native) { event.preventDefault(); snapshot = { ftaa: native.elements.ftaa.value, bfaa: native.elements.bfaa.value, action: native.getAttribute('action') }; } }, true);
                 native.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                const nativeDeadline = Date.now() + 5000;
+                while (!native.querySelector('.cf-inline-native-submit-status.is-success') && !native.querySelector('.cf-inline-native-submit-status.is-error') && Date.now() < nativeDeadline) await new Promise((resolve) => setTimeout(resolve, 100));
                 return {
-                  success: !!document.querySelector('.cf-inline-submit-status.is-success'),
+                  success: /Codeforces 已接收代码/.test(document.querySelector('.cf-inline-submit-status')?.textContent || ''),
                   status: document.querySelector('.cf-inline-submit-status')?.textContent,
                   languageCount: inlineForm.querySelectorAll('select[name="programTypeId"] option').length,
-                  nativeFtaa: snapshot?.ftaa,
-                  nativeBfaa: snapshot?.bfaa,
-                  nativeAction: snapshot?.action
+                  nativeSuccess: !!native.querySelector('.cf-inline-native-submit-status.is-success'),
+                  nativeStatus: native.querySelector('.cf-inline-native-submit-status')?.textContent
                 };
               })()`,
               awaitPromise: true,
