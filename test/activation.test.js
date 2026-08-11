@@ -23,9 +23,11 @@ test('relies on VS Code generated activation events for contributed commands', (
     'cfInline.submit',
     'cfInline.openLogin',
   ]);
-  assert.equal(manifest.contributes.viewsContainers.activitybar[0].id, 'cfInline.activity');
+  const containerId = manifest.contributes.viewsContainers.activitybar[0].id;
+  assert.equal(containerId, 'cfInline-activity');
+  assert.match(containerId, /^[A-Za-z0-9_-]+$/);
   assert.equal(manifest.contributes.viewsContainers.activitybar[0].icon, 'assets/codeforces.svg');
-  assert.equal(manifest.contributes.views['cfInline.activity'][0].id, 'cfInline.sidebar');
+  assert.equal(manifest.contributes.views[containerId][0].id, 'cfInline.activityView');
 });
 
 test('registers a native Codeforces activity-bar sidebar without launching Edge', () => {

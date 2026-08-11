@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { CfProxy } from './proxy';
 
-const SIDEBAR_VIEW_ID = 'cfInline.sidebar';
+const SIDEBAR_VIEW_ID = 'cfInline.activityView';
 
 class CfSidebarItem extends vscode.TreeItem {
   constructor(

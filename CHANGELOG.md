@@ -9,6 +9,12 @@
 - CPH 样例导入与运行集成。
 - 公开静态资源的流式混合加速与持久化缓存。
 
+## [0.9.33] - 2026-08-11
+
+### Fixed
+
+- 修复活动栏容器 ID 不符合 VS Code 格式要求，导致 Codeforces 入口错误降级到资源管理器的问题。
+
 ## [0.9.32] - 2026-08-11
 
 ### Added
@@ -67,7 +73,8 @@
 - 修复窄窗口内容重叠、水平滚动和缩放后布局卡死的问题。
 - 修复 Codeforces 多语言成功消息被误判为提交失败的问题。
 
-[Unreleased]: https://github.com/zxt-fine/vscode-cf-inline/compare/v0.9.32...HEAD
+[Unreleased]: https://github.com/zxt-fine/vscode-cf-inline/compare/v0.9.33...HEAD
+[0.9.33]: https://github.com/zxt-fine/vscode-cf-inline/releases/tag/v0.9.33
 [0.9.32]: https://github.com/zxt-fine/vscode-cf-inline/releases/tag/v0.9.32
 [0.9.31]: https://github.com/zxt-fine/vscode-cf-inline/releases/tag/v0.9.31
 [0.9.30]: https://github.com/zxt-fine/vscode-cf-inline/releases/tag/v0.9.30
