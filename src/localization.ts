@@ -493,66 +493,6 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         });
       }
     }
-    function prepareStatementBlock(block,index){
-      var clone=block.cloneNode(true);
-      Array.from(clone.querySelectorAll('.cf-inline-paragraph-toolbar,.cf-inline-paragraph-control,.cf-inline-paragraph-translation')).forEach(function(node){node.remove();});
-      clone.setAttribute('data-cfi-block',String(index));
-      var protectedNodes=[];
-      function protectNode(node){
-        if(!clone.contains(node)) return;
-        var protectedIndex=protectedNodes.length;
-        protectedNodes.push(node.cloneNode(true));
-        var placeholder=document.createElement('span');
-        placeholder.setAttribute('data-cfi-protected',String(protectedIndex));
-        placeholder.setAttribute('translate','no');
-        placeholder.className='notranslate';
-        placeholder.textContent='CFIPROTECTEDB'+index+'I'+protectedIndex+'END';
-        node.replaceWith(placeholder);
-      }
-      Array.from(clone.querySelectorAll('.MathJax,mjx-container')).forEach(function(node){
-        if(!clone.contains(node)) return;
-        var preview=node.previousElementSibling;
-        var source=node.nextElementSibling;
-        protectNode(node);
-        if(preview&&preview.classList.contains('MathJax_Preview')) preview.remove();
-        if(source&&source.tagName==='SCRIPT'&&/^math\\/tex/i.test(source.getAttribute('type')||'')) source.remove();
-      });
-      Array.from(clone.querySelectorAll('pre,code,script,style,.MathJax,.MathJax_Preview,mjx-container,.tex-span,[class*="tex-font-style"],img')).forEach(function(node){
-        protectNode(node);
-      });
-      return {html:clone.outerHTML,protectedNodes:protectedNodes};
-    }
-    function restoreStatementBlock(html,index,protectedNodes){
-      var template=document.createElement('template'); template.innerHTML=html;
-      var block=template.content.querySelector('[data-cfi-block="'+index+'"]')||template.content.firstElementChild;
-      if(!block) throw new Error('译文内容块结构无效');
-      protectedNodes.forEach(function(original,protectedIndex){
-        var marker='CFIPROTECTEDB'+index+'I'+protectedIndex+'END';
-        var placeholder=block.querySelector('[data-cfi-protected="'+protectedIndex+'"]');
-        if(placeholder){
-          placeholder.replaceWith(original.cloneNode(true));
-          return;
-        }
-        var walker=document.createTreeWalker(block,NodeFilter.SHOW_TEXT);
-        var textNode=null,markerOffset=-1;
-        while(walker.nextNode()){
-          markerOffset=(walker.currentNode.nodeValue||'').indexOf(marker);
-          if(markerOffset!==-1){textNode=walker.currentNode;break;}
-        }
-        if(!textNode) throw new Error('译文中的公式或代码占位符不完整');
-        var after=textNode.splitText(markerOffset);
-        after.nodeValue=(after.nodeValue||'').slice(marker.length);
-        after.parentNode.insertBefore(original.cloneNode(true),after);
-        if(!textNode.nodeValue) textNode.remove();
-        if(!after.nodeValue) after.remove();
-      });
-      Array.from(block.querySelectorAll('[data-cfi-protected]')).forEach(function(node){node.remove();});
-      var cleanupWalker=document.createTreeWalker(block,NodeFilter.SHOW_TEXT);
-      var cleanupNodes=[]; while(cleanupWalker.nextNode()) cleanupNodes.push(cleanupWalker.currentNode);
-      cleanupNodes.forEach(function(node){node.nodeValue=(node.nodeValue||'').replace(/CFIPROTECTEDB\\d+I\\d+END/g,'');});
-      block.removeAttribute('data-cfi-block');
-      return block;
-    }
     async function requestTranslationItems(items){
       var output=[];
       for(var offset=0;offset<items.length;offset+=32){
@@ -567,14 +507,15 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
     async function translateTextNodesSafely(block){
       var clone=block.cloneNode(true);
       Array.from(clone.querySelectorAll('.cf-inline-paragraph-toolbar,.cf-inline-paragraph-control,.cf-inline-paragraph-translation')).forEach(function(node){node.remove();});
+      Array.from(clone.querySelectorAll('.MathJax_Preview,script,style')).forEach(function(node){node.remove();});
       var walker=document.createTreeWalker(clone,NodeFilter.SHOW_TEXT),entries=[],requests=[];
       while(walker.nextNode()){
         var node=walker.currentNode,parent=node.parentElement;
         if(!parent||parent.closest('pre,code,script,style,.MathJax,.MathJax_Preview,mjx-container,.tex-span,[class*="tex-font-style"]'))continue;
-        var raw=node.nodeValue||'',leading=(raw.match(/^\s*/)||[''])[0],trailing=(raw.match(/\s*$/)||[''])[0];
+        var raw=node.nodeValue||'',leading=(raw.match(/^\\s*/)||[''])[0],trailing=(raw.match(/\\s*$/)||[''])[0];
         var core=raw.slice(leading.length,raw.length-trailing.length);
         if(!/[A-Za-z]{2}/.test(core))continue;
-        var parts=core.match(/[\s\S]{1,2800}/g)||[];
+        var parts=core.match(/[\\s\\S]{1,2800}/g)||[];
         entries.push({node:node,leading:leading,trailing:trailing,count:parts.length});requests.push.apply(requests,parts);
       }
       if(!requests.length)return clone;
@@ -582,16 +523,13 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       entries.forEach(function(entry){entry.node.nodeValue=entry.leading+translations.slice(cursor,cursor+entry.count).join('')+entry.trailing;cursor+=entry.count;});
       return clone;
     }
-    async function translateBlockReliably(block,index){
-      var prepared=prepareStatementBlock(block,index);
-      if(prepared.html.length<=4200){
-        try{
-          var translated=(await requestTranslationItems([prepared.html]))[0];
-          return restoreStatementBlock(translated,index,prepared.protectedNodes);
-        }catch(error){
-          if(!/占位符|内容块结构/.test(String(error&&error.message||error)))throw error;
-        }
-      }
+    async function translateBlockReliably(block){
+      // Bing's public translator endpoint treats HTML as plain text. Even when
+      // it happens to preserve our data attributes, it can silently replace
+      // the surrounding prose with fragments such as repeated "s" characters.
+      // Translating text nodes only keeps the original DOM, MathJax nodes and
+      // code samples untouched and also makes a structurally valid but corrupt
+      // HTML response impossible to accept as a successful translation.
       return translateTextNodesSafely(block);
     }
     function parseProblemRoute(){

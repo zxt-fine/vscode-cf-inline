@@ -36,7 +36,7 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /"Groups":"群组"/);
   assert.match(script, /"Accepted":"通过"/);
   assert.match(script, /var autoTranslateStatements=false/);
-  assert.match(script, /data-cfi-protected/);
+  assert.doesNotMatch(script, /data-cfi-protected|CFIPROTECTED/);
   assert.match(script, /pre,code,script,style/);
   assert.doesNotMatch(script, /statement\.innerHTML=/);
   assert.match(script, /cf-inline-translated-wrap/);
@@ -67,8 +67,11 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /X-CF-Inline':'submit/);
   assert.doesNotMatch(script, /caf4f|adcd1e/);
   assert.match(script, /translateTextNodesSafely/);
-  assert.match(script, /prepared\.html\.length<=4200/);
-  assert.match(script, /占位符\|内容块结构/);
+  assert.doesNotMatch(script, /prepared\.html\.length<=4200/);
+  assert.match(script, /return translateTextNodesSafely\(block\)/);
+  assert.ok(script.includes("raw.match(/^\\s*/)") && script.includes("raw.match(/\\s*$/)"));
+  assert.ok(script.includes("core.match(/[\\s\\S]{1,2800}/g)"));
+  assert.doesNotMatch(script, /core\.match\(\/\[sS\]/);
   assert.match(script, /提交到 Codeforces/);
   assert.match(script, /cleanSubmitMessage/);
   assert.match(script, /isSubmitSuccessMessage/);
