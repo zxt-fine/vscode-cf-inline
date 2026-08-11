@@ -23,6 +23,20 @@ test('relies on VS Code generated activation events for contributed commands', (
     'cfInline.submit',
     'cfInline.openLogin',
   ]);
+  assert.equal(manifest.contributes.viewsContainers.activitybar[0].id, 'cfInline.activity');
+  assert.equal(manifest.contributes.viewsContainers.activitybar[0].icon, 'assets/codeforces.svg');
+  assert.equal(manifest.contributes.views['cfInline.activity'][0].id, 'cfInline.sidebar');
+});
+
+test('registers a native Codeforces activity-bar sidebar without launching Edge', () => {
+  const extensionSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
+  const sidebarSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'sidebar.ts'), 'utf8');
+  assert.match(extensionSource, /registerCfSidebar\(proxy\)/);
+  assert.match(sidebarSource, /registerTreeDataProvider\(SIDEBAR_VIEW_ID, provider\)/);
+  assert.match(sidebarSource, /'打开 Codeforces'/);
+  assert.match(sidebarSource, /'登录并连接'/);
+  assert.match(sidebarSource, /'提交当前代码文件'/);
+  assert.doesNotMatch(sidebarSource, /loginWithOfficialBrowser|captureCodeforcesSession/);
 });
 
 test('shows the login panel first and leaves Edge launch to its button', () => {

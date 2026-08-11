@@ -3,6 +3,7 @@ import { loginWithOfficialBrowser } from './browser-login';
 import { prefersIntegratedBrowser, openInIntegratedBrowser } from './integrated-browser';
 import { CfPanel } from './panel';
 import { CfProxy } from './proxy';
+import { registerCfSidebar } from './sidebar';
 import { submitCurrentFile } from './submit';
 
 let proxy: CfProxy | undefined;
@@ -28,6 +29,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // them as a reusable Cloudflare session. Remove that stale marker once;
   // the dedicated Edge profile now retains the official login safely.
   await context.secrets.delete('cfInline.session');
+
+  context.subscriptions.push(...registerCfSidebar(proxy));
 
   const handleReloginRequest = (): void => {
     const activeProxy = proxy!;

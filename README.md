@@ -1,7 +1,7 @@
 # Codeforces Inline
 
 [![CI](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml/badge.svg)](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.9.31-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
+[![Version](https://img.shields.io/badge/version-0.9.32-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 一个面向中文竞赛编程用户的 VS Code 扩展：在 VS Code 集成浏览器中浏览 Codeforces，保留英文原题，在原文下方生成独立中文译文，并支持登录、群组、提交和评测结果跟踪。
@@ -12,6 +12,7 @@
 
 ### 浏览与登录
 
+- 在 VS Code 活动栏提供独立 Codeforces 图标，可直接展开连接状态、打开、登录和提交入口。
 - 使用 Microsoft Edge 的独立受控配置登录 Codeforces 官方网站，兼容 Cloudflare 验证和真实账号会话。
 - 插件启动时不会自动打开 Edge；只有用户主动点击登录或打开插件时才检查会话。
 - 登录窗口以普通的 `1200 × 800` 窗口打开，登录并验证成功后自动最小化。
