@@ -1,0 +1,122 @@
+{
+  "name": "vscode-cf-inline",
+  "displayName": "Codeforces Inline",
+  "description": "在 VS Code 集成浏览器中保留 Codeforces 原文并生成独立中文译文。",
+  "version": "0.9.28",
+  "publisher": "codex-local",
+  "author": "zxt-fine",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zxt-fine/vscode-cf-inline.git"
+  },
+  "homepage": "https://github.com/zxt-fine/vscode-cf-inline#readme",
+  "bugs": {
+    "url": "https://github.com/zxt-fine/vscode-cf-inline/issues"
+  },
+  "keywords": [
+    "codeforces",
+    "competitive-programming",
+    "vscode-extension",
+    "translation",
+    "chinese"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cfInline.open",
+        "title": "Codeforces Inline: 打开 Codeforces 翻译浏览器"
+      },
+      {
+        "command": "cfInline.openIntegratedBrowser",
+        "title": "Codeforces Inline: 在 VS Code 集成浏览器中打开"
+      },
+      {
+        "command": "cfInline.openPanel",
+        "title": "Codeforces Inline: 打开旧版内嵌面板"
+      },
+      {
+        "command": "cfInline.submit",
+        "title": "Codeforces Inline: 可选 · 提交当前编辑器文件"
+      },
+      {
+        "command": "cfInline.openLogin",
+        "title": "Codeforces Inline: 登录并连接 Edge 会话"
+      }
+    ],
+    "configuration": {
+      "title": "Codeforces Inline",
+      "properties": {
+        "cfInline.defaultPath": {
+          "type": "string",
+          "default": "/",
+          "description": "打开查看器时使用的路径；默认显示 Codeforces 主页。"
+        },
+        "cfInline.proxyPort": {
+          "type": "number",
+          "default": 53005,
+          "description": "集成浏览器页面使用的本地服务端口；固定端口可让 VS Code 重启后恢复原来的浏览器标签页，0 表示每次自动选择空闲端口。"
+        },
+        "cfInline.viewer": {
+          "type": "string",
+          "enum": [
+            "integratedBrowser",
+            "embeddedPanel"
+          ],
+          "enumDescriptions": [
+            "使用 VS Code 集成浏览器作为主要 Codeforces 界面。",
+            "使用插件旧版的 iframe 内嵌面板。"
+          ],
+          "default": "integratedBrowser",
+          "description": "选择汉化和翻译后的 Codeforces 页面显示位置。"
+        },
+        "cfInline.fastMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "打开插件时默认进入极速界面；极速界面和正常界面仍可在页面顶部随时切换。"
+        },
+        "cfInline.defaultLanguage": {
+          "type": "string",
+          "default": "auto",
+          "description": "提交语言偏好，例如 GNU++20；auto 会根据当前文件扩展名选择。"
+        },
+        "cfInline.localizeInterface": {
+          "type": "boolean",
+          "default": true,
+          "description": "将常用 Codeforces 界面文字翻译为简体中文。"
+        },
+        "cfInline.autoTranslateStatements": {
+          "type": "boolean",
+          "default": true,
+          "description": "自动在英文原题下方生成简体中文译文，并保护代码、公式、图片和样例。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "test": "npm run compile && node --test test/*.test.js",
+    "watch": "tsc -w -p ./",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "tough-cookie": "^4.1.4",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/tough-cookie": "^4.0.5",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.18.1",
+    "@vscode/vsce": "^3.2.1",
+    "typescript": "^5.5.4"
+  }
+}

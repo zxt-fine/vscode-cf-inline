@@ -1,0 +1,11 @@
+.vscode/**
+.github/**
+.editorconfig
+.gitattributes
+src/**
+test/**
+tsconfig.json
+.gitignore
+CONTRIBUTING.md
+SECURITY.md
+out/**/*.map

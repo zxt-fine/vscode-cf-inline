@@ -1,0 +1,79 @@
+const assert = require('node:assert/strict');
+const Module = require('node:module');
+const test = require('node:test');
+
+let createdPanel;
+const vscodeStub = {
+  ViewColumn: { One: 1 },
+  window: {
+    createWebviewPanel() {
+      let disposeHandler;
+      createdPanel = {
+        webview: {
+          html: '',
+          onDidReceiveMessage() {},
+          postMessage() { return Promise.resolve(true); },
+        },
+        onDidDispose(handler) { disposeHandler = handler; },
+        reveal() {},
+        dispose() { disposeHandler = undefined; },
+      };
+      return createdPanel;
+    },
+  },
+};
+
+const originalLoad = Module._load;
+Module._load = function (request, parent, isMain) {
+  if (request === 'vscode') return vscodeStub;
+  return originalLoad.call(this, request, parent, isMain);
+};
+
+const { CfPanel } = require('../out/panel.js');
+
+test('webview reports connected only for a verified account and acquires VS Code API once', () => {
+  const context = { secrets: {} };
+  const proxy = {
+    origin: 'http://127.0.0.1:45678',
+    currentUrlPath: '/groups/my',
+  };
+  CfPanel.createOrShow(context, proxy);
+  const html = createdPanel.webview.html;
+
+  assert.equal((html.match(/acquireVsCodeApi\(\)/g) || []).length, 1);
+  assert.match(html, /id="bridge" src="http:\/\/127\.0\.0\.1:45678\/__cf_inline\/bridge"/);
+  assert.match(html, /event\.source === bridge\.contentWindow && data\.__cfInlineBridge/);
+  assert.doesNotMatch(html, /fetch\(origin \+ '\/__cf_inline\/state'/);
+  assert.match(html, /const connected = !!state\.sessionReady && !!state\.loggedIn/);
+  assert.match(html, /已登录 · Edge 已连接/);
+  assert.match(html, /真正的 Microsoft Edge/);
+  assert.match(html, /关闭扩展与同步/);
+  assert.match(html, /自行提供桌面版中文界面/);
+  assert.doesNotMatch(html, /保存登录|saveLogin/);
+  for (const pathname of ['/groups/my', '/contests', '/gyms', '/problemset']) {
+    assert.match(html, new RegExp(`data-path="${pathname}"`));
+  }
+  assert.match(html, /id="loadProgress"/);
+  assert.match(html, /id="loginProgress"/);
+  assert.match(html, /id="loginStage"/);
+  assert.match(html, /id="loginProgressBar"/);
+  assert.match(html, /function updateLoginProgress\(text\)/);
+  assert.match(html, /let currentLoginStage = '正在打开 Edge 登录页面…'/);
+  assert.match(html, /正在验证 我的群组/);
+  assert.match(html, /正在验证 比赛/);
+  assert.match(html, /正在验证 训练营/);
+  assert.match(html, /正在验证 题库/);
+  assert.match(html, /正在限流预检/);
+  assert.match(html, /预处理进度 4\/4/);
+  assert.match(html, /常用页面预处理完成/);
+  assert.match(html, /data\.type === 'loginProgress'/);
+  assert.match(html, /验证完成，正在加载 Codeforces 页面/);
+  assert.match(html, /function startLoading\(\)/);
+  assert.match(html, /加载时间较长，仍在等待 Edge 返回页面/);
+  assert.match(html, /页面可能已卡住/);
+  assert.match(html, /data\.__cfInlinePageReady/);
+  assert.match(html, /data\.__cfInlinePageLoading/);
+  assert.match(html, /data\.__cfInlinePageError/);
+  assert.match(html, /frame\.src = 'about:blank'/);
+  assert.doesNotMatch(html, /id="submit"|type: 'submit'/);
+});
