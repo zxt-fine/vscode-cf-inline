@@ -57,7 +57,8 @@ async function main() {
       }
       const translationToggle = rendered.pageState?.translationToggle;
       if (!bodyText.includes('Hello problem statement.')
-        || !bodyText.includes('你好，题目描述。')
+        || !translationToggle?.translatedText.includes('你好，题目描述。')
+        || !translationToggle?.translatedText.includes('公式后的补充说明。')
         || !translationToggle?.sameMathNode
         || translationToggle.translatedMathText !== '2n rendered'
         || translationToggle.translatedMathCount !== 1
@@ -67,6 +68,11 @@ async function main() {
         || translationToggle.typesetCalls !== 0
         || translationToggle.leakedMarker) {
         throw new Error(`Repeated translation toggles damaged the statement: ${JSON.stringify(rendered.pageState?.translationToggle)}`);
+      }
+      if (!session.transport.translationPayloads.some((item) => item.includes('⟦CFI')
+        && item.includes('Hello problem statement.')
+        && item.includes('Additional explanation after the formula.'))) {
+        throw new Error(`Adjacent text nodes were not combined into one translation request: ${JSON.stringify(session.transport.translationPayloads)}`);
       }
       const paragraphTranslation = rendered.pageState?.paragraphTranslation;
       if (!paragraphTranslation?.hasControl
@@ -153,7 +159,7 @@ function syntheticSession() {
     <div style="font: 24px sans-serif; color: #123">Groups content is visible</div>
     <div id="globalEnglish" class="ttypography"><p>This is an English announcement outside the problem statement.</p><ol><li>First solver: tourist</li><li>Second solver: Benq</li></ol></div>
     <a id="linkedTopic" href="/blog/entry/1"><div id="linkedEnglish" class="ttypography"><h1>ICPC Challenge powered by Huawei</h1><p>By ICPCNews, 9 days ago.</p></div></a>
-    <section class="problem-statement"><div class="header"><div>time limit per test</div></div><div><p>Hello problem statement. <span class="MathJax_Preview"></span><span class="MathJax"><span>2n rendered</span></span><script type="math/tex">2n</script></p><code>int x;</code></div><div class="sample-tests"><div class="section-title">Examples</div><pre>1 2</pre></div></section></main></div>
+    <section class="problem-statement"><div class="header"><div>time limit per test</div></div><div><p>Hello problem statement. <span class="MathJax_Preview"></span><span class="MathJax"><span>2n rendered</span></span><script type="math/tex">2n</script> Additional explanation after the formula.</p><code>int x;</code></div><div class="sample-tests"><div class="section-title">Examples</div><pre>1 2</pre></div></section></main></div>
     <script>if (window.parent.frames.length > 0) { window.stop(); }</script>
     <footer>Rendered footer</footer></div>
   </body></html>`;
@@ -165,16 +171,22 @@ function syntheticSession() {
     </form><script>window._ftaa="ftaa-browser-value";window._bfaa="bfaa-browser-value";</script>
   </body></html>`;
   const submissions = [];
+  const translationPayloads = [];
   const transport = {
       submissions,
+      translationPayloads,
       isAlive: () => true,
       dispose: async () => {},
-      translateHtmlItems: async (items) => items.map((html) => html
-        .replace('Hello problem statement.', '你好，题目描述。')
-        .replace('This is an English announcement outside the problem statement.', '这是一段英文公告，位于题目描述之外。')
-        .replace('ICPC Challenge powered by Huawei', 'ICPC 挑战赛由华为提供支持')
-        .replace('By ICPCNews, 9 days ago.', '由 ICPCNews 发布，9 天前。')
-        .replace(/ data-cfi-protected="\d+"/g, '')),
+      translateHtmlItems: async (items) => {
+        translationPayloads.push(...items);
+        return items.map((html) => html
+          .replace('Hello problem statement.', '你好，题目描述。')
+          .replace('Additional explanation after the formula.', '公式后的补充说明。')
+          .replace('This is an English announcement outside the problem statement.', '这是一段英文公告，位于题目描述之外。')
+          .replace('ICPC Challenge powered by Huawei', 'ICPC 挑战赛由华为提供支持')
+          .replace('By ICPCNews, 9 days ago.', '由 ICPCNews 发布，9 天前。')
+          .replace(/ data-cfi-protected="\d+"/g, ''));
+      },
       submitSolution: async (request) => {
         submissions.push(request);
         return { statusCode: 200, headers: { 'content-type': 'text/html; charset=UTF-8' }, body: Buffer.from('<script>Codeforces.showMessage("Solution to the problem A has been submitted successfully")</script>', 'utf8'), finalUrl: 'https://codeforces.com/group/test-group/contest/123/my' };

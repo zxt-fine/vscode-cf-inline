@@ -508,19 +508,44 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       var clone=block.cloneNode(true);
       Array.from(clone.querySelectorAll('.cf-inline-paragraph-toolbar,.cf-inline-paragraph-control,.cf-inline-paragraph-translation')).forEach(function(node){node.remove();});
       Array.from(clone.querySelectorAll('.MathJax_Preview,script,style')).forEach(function(node){node.remove();});
-      var walker=document.createTreeWalker(clone,NodeFilter.SHOW_TEXT),entries=[],requests=[];
+      var walker=document.createTreeWalker(clone,NodeFilter.SHOW_TEXT),entries=[],pieces=[];
       while(walker.nextNode()){
         var node=walker.currentNode,parent=node.parentElement;
         if(!parent||parent.closest('pre,code,script,style,.MathJax,.MathJax_Preview,mjx-container,.tex-span,[class*="tex-font-style"]'))continue;
         var raw=node.nodeValue||'',leading=(raw.match(/^\\s*/)||[''])[0],trailing=(raw.match(/\\s*$/)||[''])[0];
         var core=raw.slice(leading.length,raw.length-trailing.length);
         if(!/[A-Za-z]{2}/.test(core))continue;
-        var parts=core.match(/[\\s\\S]{1,2800}/g)||[];
-        entries.push({node:node,leading:leading,trailing:trailing,count:parts.length});requests.push.apply(requests,parts);
+        var parts=core.match(/[\\s\\S]{1,2200}/g)||[];
+        var entry={node:node,leading:leading,trailing:trailing,pieces:[]};
+        parts.forEach(function(text){var piece={id:pieces.length,text:text,translation:''};entry.pieces.push(piece);pieces.push(piece);});
+        entries.push(entry);
       }
-      if(!requests.length)return clone;
-      var translations=await requestTranslationItems(requests),cursor=0;
-      entries.forEach(function(entry){entry.node.nodeValue=entry.leading+translations.slice(cursor,cursor+entry.count).join('')+entry.trailing;cursor+=entry.count;});
+      if(!pieces.length)return clone;
+      function marker(piece){return '⟦CFI'+piece.id+'⟧';}
+      var groups=[],group=[],groupLength=0;
+      pieces.forEach(function(piece){
+        var extra=piece.text.length+(group.length?marker(piece).length:0);
+        if(group.length&&groupLength+extra>2800){groups.push(group);group=[];groupLength=0;extra=piece.text.length;}
+        group.push(piece);groupLength+=extra;
+      });
+      if(group.length)groups.push(group);
+      var payloads=groups.map(function(items){return items.map(function(piece,index){return(index?marker(piece):'')+piece.text;}).join('');});
+      var translatedGroups=await requestTranslationItems(payloads),fallback=[];
+      groups.forEach(function(items,groupIndex){
+        var remaining=translatedGroups[groupIndex]||'',segments=[],valid=true;
+        for(var index=1;index<items.length;index++){
+          var nextMarker=marker(items[index]),position=remaining.indexOf(nextMarker);
+          if(position<0){valid=false;break;}
+          segments.push(remaining.slice(0,position));remaining=remaining.slice(position+nextMarker.length);
+        }
+        if(valid){segments.push(remaining);items.forEach(function(piece,index){piece.translation=segments[index];});}
+        else fallback.push.apply(fallback,items);
+      });
+      if(fallback.length){
+        var fallbackTranslations=await requestTranslationItems(fallback.map(function(piece){return piece.text;}));
+        fallback.forEach(function(piece,index){piece.translation=fallbackTranslations[index];});
+      }
+      entries.forEach(function(entry){entry.node.nodeValue=entry.leading+entry.pieces.map(function(piece){return piece.translation;}).join('')+entry.trailing;});
       return clone;
     }
     async function translateBlockReliably(block){
@@ -895,7 +920,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           var translatedByIndex=new Map();
           var nextPrepared=0;
           async function worker(){while(nextPrepared<prepared.length){var entry=prepared[nextPrepared++];translatedByIndex.set(entry.index,await translateBlockReliably(entry.block,entry.index));}}
-          await Promise.all([worker(),worker()]);
+          await Promise.all([worker(),worker(),worker(),worker(),worker(),worker()]);
           translatedWrap=document.createElement('section'); translatedWrap.className='cf-inline-translated-wrap';
           var heading=document.createElement('div'); heading.className='cf-inline-translated-heading'; heading.textContent='中文翻译';
           var translatedStatement=document.createElement('div'); translatedStatement.className='problem-statement cf-inline-translated-statement';

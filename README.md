@@ -1,7 +1,7 @@
 # Codeforces Inline
 
 [![CI](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml/badge.svg)](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.9.30-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
+[![Version](https://img.shields.io/badge/version-0.9.31-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 一个面向中文竞赛编程用户的 VS Code 扩展：在 VS Code 集成浏览器中浏览 Codeforces，保留英文原题，在原文下方生成独立中文译文，并支持登录、群组、提交和评测结果跟踪。

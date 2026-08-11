@@ -70,8 +70,11 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.doesNotMatch(script, /prepared\.html\.length<=4200/);
   assert.match(script, /return translateTextNodesSafely\(block\)/);
   assert.ok(script.includes("raw.match(/^\\s*/)") && script.includes("raw.match(/\\s*$/)"));
-  assert.ok(script.includes("core.match(/[\\s\\S]{1,2800}/g)"));
+  assert.ok(script.includes("core.match(/[\\s\\S]{1,2200}/g)"));
   assert.doesNotMatch(script, /core\.match\(\/\[sS\]/);
+  assert.match(script, /'⟦CFI'\+piece\.id\+'⟧'/);
+  assert.match(script, /if\(fallback\.length\)/);
+  assert.match(script, /Promise\.all\(\[worker\(\),worker\(\),worker\(\),worker\(\),worker\(\),worker\(\)\]\)/);
   assert.match(script, /提交到 Codeforces/);
   assert.match(script, /cleanSubmitMessage/);
   assert.match(script, /isSubmitSuccessMessage/);
