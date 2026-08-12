@@ -119,5 +119,19 @@ export class CfSidebarProvider implements vscode.TreeDataProvider<CfSidebarItem>
 
 export function registerCfSidebar(proxy: CfProxy): vscode.Disposable[] {
   const provider = new CfSidebarProvider(proxy);
-  return [provider, vscode.window.registerTreeDataProvider(SIDEBAR_VIEW_ID, provider)];
+  const tree = vscode.window.createTreeView(SIDEBAR_VIEW_ID, {
+    treeDataProvider: provider,
+    showCollapseAll: false,
+  });
+  let opening = false;
+  const visibility = tree.onDidChangeVisibility((event) => {
+    if (!event.visible || opening) {
+      return;
+    }
+    opening = true;
+    void Promise.resolve(vscode.commands.executeCommand('cfInline.open')).finally(() => {
+      opening = false;
+    });
+  });
+  return [provider, tree, visibility];
 }

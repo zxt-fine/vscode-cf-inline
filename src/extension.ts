@@ -30,8 +30,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // the dedicated Edge profile now retains the official login safely.
   await context.secrets.delete('cfInline.session');
 
-  context.subscriptions.push(...registerCfSidebar(proxy));
-
   const handleReloginRequest = (): void => {
     const activeProxy = proxy!;
     activeProxy.setLoginProgress(true, '正在打开 Edge 登录页面…');
@@ -100,6 +98,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
     }
   );
+
+  // Register the activity-bar click handler only after cfInline.open exists,
+  // so the very first click after installation can open the editor page.
+  context.subscriptions.push(...registerCfSidebar(proxy));
 
   // Do not start Edge during VS Code activation. A saved session is checked only
   // after the user explicitly opens this extension or requests an authenticated action.

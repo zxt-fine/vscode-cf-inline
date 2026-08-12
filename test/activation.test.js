@@ -34,7 +34,10 @@ test('registers a native Codeforces activity-bar sidebar without launching Edge'
   const extensionSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
   const sidebarSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'sidebar.ts'), 'utf8');
   assert.match(extensionSource, /registerCfSidebar\(proxy\)/);
-  assert.match(sidebarSource, /registerTreeDataProvider\(SIDEBAR_VIEW_ID, provider\)/);
+  assert.ok(extensionSource.indexOf("registerCommand('cfInline.open'") < extensionSource.indexOf('registerCfSidebar(proxy)'));
+  assert.match(sidebarSource, /createTreeView\(SIDEBAR_VIEW_ID/);
+  assert.match(sidebarSource, /tree\.onDidChangeVisibility/);
+  assert.match(sidebarSource, /executeCommand\('cfInline\.open'\)/);
   assert.match(sidebarSource, /'打开 Codeforces 浏览器'/);
   assert.match(sidebarSource, /'重新连接 Edge'/);
   assert.match(sidebarSource, /'提交当前编辑器代码'/);
