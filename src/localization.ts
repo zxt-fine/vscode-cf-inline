@@ -202,6 +202,26 @@ function shortDelay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function isUsefulChineseTranslation(source: string, translated: string): boolean {
+  const stripMarkers = (value: string): string =>
+    value.replace(/⟦CFI\d+⟧/g, '').replace(/\s+/g, ' ').trim();
+  const original = stripMarkers(source);
+  const candidate = stripMarkers(translated);
+  if (!candidate) {
+    return false;
+  }
+  const sourceLatin = (original.match(/[A-Za-z]/g) ?? []).length;
+  if (candidate.toLowerCase() === original.toLowerCase() && sourceLatin >= 12) {
+    return false;
+  }
+  if (sourceLatin < 24) {
+    return true;
+  }
+  const translatedLatin = (candidate.match(/[A-Za-z]/g) ?? []).length;
+  const translatedHan = (candidate.match(/[\u3400-\u9fff]/g) ?? []).length;
+  return translatedHan >= 2 || translatedLatin < sourceLatin * 0.7;
+}
+
 async function requestBingSession(
   requester: TranslationRequester,
   forceRefresh = false
@@ -352,6 +372,9 @@ async function translateOne(html: string, requester: TranslationRequester): Prom
     // often unavailable without a VPN. Trying Bing first avoids a guaranteed
     // Google timeout on every fresh VS Code session.
     translated = await requestBingTranslation(html, requester);
+    if (!isUsefulChineseTranslation(html, translated)) {
+      throw new Error('Bing 返回的内容仍为英文原文');
+    }
   } catch (error) {
     bingError = error;
   }
@@ -359,6 +382,9 @@ async function translateOne(html: string, requester: TranslationRequester): Prom
   if (translated === undefined && Date.now() >= googleUnavailableUntil) {
     try {
       translated = await requestGoogleTranslation(html, requester);
+      if (!isUsefulChineseTranslation(html, translated)) {
+        throw new Error('Google 返回的内容仍为英文原文');
+      }
       googleUnavailableUntil = 0;
     } catch (error) {
       googleError = error;
@@ -515,12 +541,22 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         var raw=node.nodeValue||'',leading=(raw.match(/^\\s*/)||[''])[0],trailing=(raw.match(/\\s*$/)||[''])[0];
         var core=raw.slice(leading.length,raw.length-trailing.length);
         if(!/[A-Za-z]{2}/.test(core))continue;
+        if(dictionary[core.trim()])continue;
         var parts=core.match(/[\\s\\S]{1,2200}/g)||[];
         var entry={node:node,leading:leading,trailing:trailing,pieces:[]};
         parts.forEach(function(text){var piece={id:pieces.length,text:text,translation:''};entry.pieces.push(piece);pieces.push(piece);});
         entries.push(entry);
       }
       if(!pieces.length)return clone;
+      function useful(source,translated){
+        var clean=function(value){return String(value||'').replace(/⟦CFI\d+⟧/g,'').replace(/\s+/g,' ').trim();};
+        var original=clean(source),candidate=clean(translated),sourceLatin=(original.match(/[A-Za-z]/g)||[]).length;
+        if(!candidate)return false;
+        if(candidate.toLowerCase()===original.toLowerCase()&&sourceLatin>=12)return false;
+        if(sourceLatin<24)return true;
+        var translatedLatin=(candidate.match(/[A-Za-z]/g)||[]).length,translatedHan=(candidate.match(/[\u3400-\u9fff]/g)||[]).length;
+        return translatedHan>=2||translatedLatin<sourceLatin*0.7;
+      }
       function marker(piece){return '⟦CFI'+piece.id+'⟧';}
       var groups=[],group=[],groupLength=0;
       pieces.forEach(function(piece){
@@ -538,12 +574,20 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           if(position<0){valid=false;break;}
           segments.push(remaining.slice(0,position));remaining=remaining.slice(position+nextMarker.length);
         }
-        if(valid){segments.push(remaining);items.forEach(function(piece,index){piece.translation=segments[index];});}
-        else fallback.push.apply(fallback,items);
+        if(valid){
+          segments.push(remaining);
+          items.forEach(function(piece,index){
+            if(useful(piece.text,segments[index]))piece.translation=segments[index];
+            else fallback.push(piece);
+          });
+        }else fallback.push.apply(fallback,items);
       });
       if(fallback.length){
         var fallbackTranslations=await requestTranslationItems(fallback.map(function(piece){return piece.text;}));
-        fallback.forEach(function(piece,index){piece.translation=fallbackTranslations[index];});
+        fallback.forEach(function(piece,index){
+          if(!useful(piece.text,fallbackTranslations[index]))throw new Error('在线翻译仍返回英文原文，请稍后重试');
+          piece.translation=fallbackTranslations[index];
+        });
       }
       entries.forEach(function(entry){entry.node.nodeValue=entry.leading+entry.pieces.map(function(piece){return piece.translation;}).join('')+entry.trailing;});
       return clone;

@@ -2,7 +2,7 @@
   "name": "vscode-cf-inline",
   "displayName": "Codeforces Inline",
   "description": "在 VS Code 集成浏览器中保留 Codeforces 原文并生成独立中文译文。",
-  "version": "0.9.35",
+  "version": "0.9.36",
   "publisher": "codex-local",
   "author": "zxt-fine",
   "license": "MIT",

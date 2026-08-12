@@ -9,6 +9,13 @@
 - CPH 样例导入与运行集成。
 - 公开静态资源的流式混合加速与持久化缓存。
 
+## [0.9.36] - 2026-08-12
+
+### Fixed
+
+- 增加译文质量校验；在线服务原样返回英文时不再误判为翻译成功，而是自动逐段重试并切换备用服务。
+- 内置界面标签继续使用本地词典处理，严格正文校验不会影响时间限制、内存限制等固定标签。
+
 ## [0.9.35] - 2026-08-12
 
 ### Changed
@@ -89,7 +96,8 @@
 - 修复窄窗口内容重叠、水平滚动和缩放后布局卡死的问题。
 - 修复 Codeforces 多语言成功消息被误判为提交失败的问题。
 
-[Unreleased]: https://github.com/zxt-fine/vscode-cf-inline/compare/v0.9.35...HEAD
+[Unreleased]: https://github.com/zxt-fine/vscode-cf-inline/compare/v0.9.36...HEAD
+[0.9.36]: https://github.com/zxt-fine/vscode-cf-inline/releases/tag/v0.9.36
 [0.9.35]: https://github.com/zxt-fine/vscode-cf-inline/releases/tag/v0.9.35
 [0.9.34]: https://github.com/zxt-fine/vscode-cf-inline/releases/tag/v0.9.34
 [0.9.33]: https://github.com/zxt-fine/vscode-cf-inline/releases/tag/v0.9.33

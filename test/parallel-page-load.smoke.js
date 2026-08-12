@@ -59,6 +59,7 @@ async function main() {
       if (!bodyText.includes('Hello problem statement.')
         || !translationToggle?.translatedText.includes('你好，题目描述。')
         || !translationToggle?.translatedText.includes('公式后的补充说明。')
+        || !translationToggle?.translatedText.includes('这是该题的困难版本')
         || !translationToggle?.sameMathNode
         || translationToggle.translatedMathText !== '2n rendered'
         || translationToggle.translatedMathCount !== 1
@@ -159,7 +160,7 @@ function syntheticSession() {
     <div style="font: 24px sans-serif; color: #123">Groups content is visible</div>
     <div id="globalEnglish" class="ttypography"><p>This is an English announcement outside the problem statement.</p><ol><li>First solver: tourist</li><li>Second solver: Benq</li></ol></div>
     <a id="linkedTopic" href="/blog/entry/1"><div id="linkedEnglish" class="ttypography"><h1>ICPC Challenge powered by Huawei</h1><p>By ICPCNews, 9 days ago.</p></div></a>
-    <section class="problem-statement"><div class="header"><div>time limit per test</div></div><div><p>Hello problem statement. <span class="MathJax_Preview"></span><span class="MathJax"><span>2n rendered</span></span><script type="math/tex">2n</script> Additional explanation after the formula.</p><code>int x;</code></div><div class="sample-tests"><div class="section-title">Examples</div><pre>1 2</pre></div></section></main></div>
+    <section class="problem-statement"><div class="header"><div>time limit per test</div></div><div><p><strong>This is the hard version of the problem. The only difference between the two versions is the allowed range.</strong></p><p>Hello problem statement. <span class="MathJax_Preview"></span><span class="MathJax"><span>2n rendered</span></span><script type="math/tex">2n</script> Additional explanation after the formula.</p><code>int x;</code></div><div class="sample-tests"><div class="section-title">Examples</div><pre>1 2</pre></div></section></main></div>
     <script>if (window.parent.frames.length > 0) { window.stop(); }</script>
     <footer>Rendered footer</footer></div>
   </body></html>`;
@@ -172,6 +173,7 @@ function syntheticSession() {
   </body></html>`;
   const submissions = [];
   const translationPayloads = [];
+  let hardVersionReturnedUnchanged = false;
   const transport = {
       submissions,
       translationPayloads,
@@ -179,13 +181,22 @@ function syntheticSession() {
       dispose: async () => {},
       translateHtmlItems: async (items) => {
         translationPayloads.push(...items);
-        return items.map((html) => html
-          .replace('Hello problem statement.', '你好，题目描述。')
-          .replace('Additional explanation after the formula.', '公式后的补充说明。')
-          .replace('This is an English announcement outside the problem statement.', '这是一段英文公告，位于题目描述之外。')
-          .replace('ICPC Challenge powered by Huawei', 'ICPC 挑战赛由华为提供支持')
-          .replace('By ICPCNews, 9 days ago.', '由 ICPCNews 发布，9 天前。')
-          .replace(/ data-cfi-protected="\d+"/g, ''));
+        return items.map((html) => {
+          if (html.includes('This is the hard version of the problem.') && !hardVersionReturnedUnchanged) {
+            hardVersionReturnedUnchanged = true;
+            return html;
+          }
+          return html
+            .replace('This is the hard version of the problem. The only difference between the two versions is the allowed range.', '这是该题的困难版本，两个版本的唯一区别是允许范围。')
+            .replace('Hello problem statement.', '你好，题目描述。')
+            .replace('Additional explanation after the formula.', '公式后的补充说明。')
+            .replace('This is an English announcement outside the problem statement.', '这是一段英文公告，位于题目描述之外。')
+            .replace('First solver: tourist', '第一位解题者：tourist')
+            .replace('Second solver: Benq', '第二位解题者：Benq')
+            .replace('ICPC Challenge powered by Huawei', 'ICPC 挑战赛由华为提供支持')
+            .replace('By ICPCNews, 9 days ago.', '由 ICPCNews 发布，9 天前。')
+            .replace(/ data-cfi-protected="\d+"/g, '');
+        });
       },
       submitSolution: async (request) => {
         submissions.push(request);

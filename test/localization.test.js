@@ -5,10 +5,19 @@ const {
   buildLocalizationClientScript,
   buildPageZoomClientScript,
   CONTROLLED_CODEFORCES_DESKTOP_CSS,
+  isUsefulChineseTranslation,
   parseGoogleTranslationResponse,
   parseBingTranslationResponse,
   translateHtmlItems,
 } = require('../out/localization.js');
+
+test('rejects unchanged long English text while allowing Chinese and short technical labels', () => {
+  const source = 'This is the hard version of the problem. The only difference between the two versions is the allowed range.';
+  assert.equal(isUsefulChineseTranslation(source, source), false);
+  assert.equal(isUsefulChineseTranslation(source, '这是该问题的困难版本，两个版本之间唯一的区别是允许范围。'), true);
+  assert.equal(isUsefulChineseTranslation('Hello problem statement.', 'Hello problem statement.'), false);
+  assert.equal(isUsefulChineseTranslation('GNU G++20', 'GNU G++20'), true);
+});
 
 test('supports persistent Ctrl+wheel page zoom and Ctrl+0 reset', () => {
   const script = buildPageZoomClientScript();
@@ -74,6 +83,8 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.doesNotMatch(script, /core\.match\(\/\[sS\]/);
   assert.match(script, /'⟦CFI'\+piece\.id\+'⟧'/);
   assert.match(script, /if\(fallback\.length\)/);
+  assert.match(script, /在线翻译仍返回英文原文/);
+  assert.match(script, /if\(dictionary\[core\.trim\(\)\]\)continue/);
   assert.match(script, /Promise\.all\(\[worker\(\),worker\(\),worker\(\),worker\(\),worker\(\),worker\(\)\]\)/);
   assert.match(script, /提交到 Codeforces/);
   assert.match(script, /cleanSubmitMessage/);
