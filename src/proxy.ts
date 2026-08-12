@@ -14,6 +14,7 @@ export interface CfProxyOptions {
   fastMode?: boolean;
   localizeInterface?: boolean;
   autoTranslateStatements?: boolean;
+  writeClipboardText?: (text: string) => Promise<void>;
 }
 
 export interface CfState {
@@ -133,6 +134,7 @@ export class CfProxy extends EventEmitter {
   private readonly inFlightPageRequests = new Map<string, Promise<CfTransportResponse>>();
   private staticCacheBytes = 0;
   private readonly localizationOptions: LocalizationOptions;
+  private readonly writeClipboardText?: (text: string) => Promise<void>;
 
   constructor(options: CfProxyOptions) {
     super();
@@ -145,6 +147,7 @@ export class CfProxy extends EventEmitter {
       localizeInterface: options.localizeInterface ?? true,
       autoTranslateStatements: options.autoTranslateStatements ?? true,
     };
+    this.writeClipboardText = options.writeClipboardText;
   }
 
   get origin(): string {
@@ -351,6 +354,10 @@ export class CfProxy extends EventEmitter {
       }
       if (new URL(rawUrl, this.origin).pathname === '/__cf_inline/submit') {
         await this.handleBrowserSubmission(req, res);
+        return;
+      }
+      if (new URL(rawUrl, this.origin).pathname === '/__cf_inline/clipboard') {
+        await this.handleClipboard(req, res);
         return;
       }
       if (rawUrl.startsWith('/__cf_inline/')) {
@@ -744,6 +751,33 @@ export class CfProxy extends EventEmitter {
     }
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Not found');
+  }
+
+  private async handleClipboard(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    if (req.method !== 'POST' || req.headers['x-cf-inline'] !== 'clipboard') {
+      this.writeJson(res, { error: '无效的剪贴板请求' }, 403);
+      return;
+    }
+    try {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of req) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += bytes.length;
+        if (size > 1024 * 1024) throw new Error('复制内容过长');
+        chunks.push(bytes);
+      }
+      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { text?: unknown };
+      if (typeof payload.text !== 'string') throw new Error('复制内容格式无效');
+      if (!this.writeClipboardText) throw new Error('VS Code 剪贴板通道不可用');
+      await this.writeClipboardText(payload.text);
+      this.writeJson(res, { ok: true });
+    } catch (err) {
+      this.writeJson(res, { error: err instanceof Error ? err.message : String(err) }, 500);
+    }
   }
 
   private async handleTranslation(

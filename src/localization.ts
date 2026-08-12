@@ -126,6 +126,9 @@ export const UI_TRANSLATIONS: Record<string, string> = {
 };
 
 const translationCache = new Map<string, string>();
+const MAX_CONCURRENT_TRANSLATIONS = 6;
+let activeTranslations = 0;
+const translationWaiters: Array<() => void> = [];
 
 export interface TranslationHttpRequest {
   url: string;
@@ -187,6 +190,8 @@ interface BingTranslationSession {
 let bingSession: BingTranslationSession | undefined;
 let bingSessionPromise: Promise<BingTranslationSession> | undefined;
 let googleUnavailableUntil = 0;
+let preferredTranslationProvider: 'bing' | 'google' | undefined;
+let translationProviderProbePromise: Promise<'bing' | 'google'> | undefined;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -202,9 +207,28 @@ function shortDelay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function acquireTranslationSlot(): Promise<void> {
+  if (activeTranslations < MAX_CONCURRENT_TRANSLATIONS) {
+    activeTranslations += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => translationWaiters.push(resolve));
+  activeTranslations += 1;
+}
+
+function releaseTranslationSlot(): void {
+  activeTranslations = Math.max(0, activeTranslations - 1);
+  translationWaiters.shift()?.();
+}
+
 export function isUsefulChineseTranslation(source: string, translated: string): boolean {
   const stripMarkers = (value: string): string =>
-    value.replace(/⟦CFI\d+⟧/g, '').replace(/\s+/g, ' ').trim();
+    value
+      .replace(/⟦CFI\d+⟧/g, '')
+      .replace(/ZXCF(?:MATH|SAFE)\d+XZ/gi, '')
+      .replace(/\[\[\s*93\s*\d+\s*7\s*\d+\s*(?:39|49)\s*\]\]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
   const original = stripMarkers(source);
   const candidate = stripMarkers(translated);
   if (!candidate) {
@@ -214,12 +238,18 @@ export function isUsefulChineseTranslation(source: string, translated: string): 
   if (candidate.toLowerCase() === original.toLowerCase() && sourceLatin >= 12) {
     return false;
   }
-  if (sourceLatin < 24) {
-    return true;
-  }
   const translatedLatin = (candidate.match(/[A-Za-z]/g) ?? []).length;
   const translatedHan = (candidate.match(/[\u3400-\u9fff]/g) ?? []).length;
-  return translatedHan >= 2 || translatedLatin < sourceLatin * 0.7;
+  if (sourceLatin >= 12 && translatedHan < 2) {
+    return false;
+  }
+  if (translatedHan >= 2 && /(?:\b[A-Za-z]{2,}\b[\s,;:'"()\-–—]*){6,}/.test(candidate)) {
+    return false;
+  }
+  if (sourceLatin >= 40 && translatedLatin >= sourceLatin * 0.72) {
+    return false;
+  }
+  return true;
 }
 
 async function requestBingSession(
@@ -365,42 +395,77 @@ async function translateOne(html: string, requester: TranslationRequester): Prom
   if (cached !== undefined) {
     return cached;
   }
-  let translated: string | undefined;
-  let bingError: unknown;
-  try {
-    // Bing is normally directly reachable in mainland China, while Google is
-    // often unavailable without a VPN. Trying Bing first avoids a guaranteed
-    // Google timeout on every fresh VS Code session.
-    translated = await requestBingTranslation(html, requester);
-    if (!isUsefulChineseTranslation(html, translated)) {
-      throw new Error('Bing 返回的内容仍为英文原文');
+  const runProvider = async (provider: 'bing' | 'google'): Promise<string> => {
+    const value = provider === 'bing'
+      ? await requestBingTranslation(html, requester)
+      : await requestGoogleTranslation(html, requester);
+    if (!isUsefulChineseTranslation(html, value)) {
+      throw new Error(`${provider === 'bing' ? 'Bing' : 'Google'} 返回的内容仍为英文原文`);
     }
-  } catch (error) {
-    bingError = error;
-  }
-  let googleError: unknown = new Error('本次会话已检测到 Google 不可达，暂时跳过');
-  if (translated === undefined && Date.now() >= googleUnavailableUntil) {
+    return value;
+  };
+  let translated: string | undefined;
+  let preferredError: unknown;
+  if (preferredTranslationProvider) {
     try {
-      translated = await requestGoogleTranslation(html, requester);
-      if (!isUsefulChineseTranslation(html, translated)) {
-        throw new Error('Google 返回的内容仍为英文原文');
-      }
-      googleUnavailableUntil = 0;
+      translated = await runProvider(preferredTranslationProvider);
     } catch (error) {
-      googleError = error;
-      googleUnavailableUntil = Date.now() + 10 * 60 * 1000;
+      preferredError = error;
+      if (preferredTranslationProvider === 'google') {
+        googleUnavailableUntil = Date.now() + 10 * 60 * 1000;
+      }
+      preferredTranslationProvider = undefined;
+    }
+  }
+  if (translated === undefined && !preferredTranslationProvider && translationProviderProbePromise) {
+    try {
+      const provider = await translationProviderProbePromise;
+      translated = await runProvider(provider);
+      preferredTranslationProvider = provider;
+    } catch {
+      // The leader will clear the failed probe; continue with a fresh race.
     }
   }
   if (translated === undefined) {
-    throw new Error(
-      `在线翻译不可用；Bing：${errorMessage(bingError)}；Google：${errorMessage(googleError)}`
-    );
+    const candidates: Array<{ provider: 'bing' | 'google'; promise: Promise<string> }> = [
+      { provider: 'bing', promise: runProvider('bing') },
+    ];
+    if (Date.now() >= googleUnavailableUntil) {
+      candidates.push({ provider: 'google', promise: runProvider('google') });
+    }
+    const probe = Promise.any(candidates.map(({ provider, promise }) =>
+        promise.then((value) => ({ provider, value }))
+      ));
+    translationProviderProbePromise = probe.then((winner) => winner.provider);
+    try {
+      const winner = await probe;
+      preferredTranslationProvider = winner.provider;
+      if (winner.provider === 'google') {
+        googleUnavailableUntil = 0;
+      }
+      translated = winner.value;
+    } catch (error) {
+      throw new Error(
+        `在线翻译不可用：${errorMessage(preferredError ?? error)}`
+      );
+    } finally {
+      translationProviderProbePromise = undefined;
+    }
   }
   if (translationCache.size >= 500) {
     translationCache.delete(translationCache.keys().next().value as string);
   }
   translationCache.set(html, translated);
   return translated;
+}
+
+export function resetTranslationStateForTests(): void {
+  translationCache.clear();
+  bingSession = undefined;
+  bingSessionPromise = undefined;
+  googleUnavailableUntil = 0;
+  preferredTranslationProvider = undefined;
+  translationProviderProbePromise = undefined;
 }
 
 export async function translateHtmlItems(
@@ -419,10 +484,16 @@ export async function translateHtmlItems(
   async function worker(): Promise<void> {
     while (next < items.length) {
       const index = next++;
-      output[index] = await translateOne(items[index], requester);
+      await acquireTranslationSlot();
+      try {
+        output[index] = await translateOne(items[index], requester);
+      } finally {
+        releaseTranslationSlot();
+      }
     }
   }
-  await Promise.all([worker(), worker()]);
+  const workerCount = Math.min(6, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
   return output;
 }
 
@@ -458,6 +529,42 @@ export function buildPageZoomClientScript(): string {
     }
     function adjust(direction){scale+=direction>0?0.1:-0.1;wheelDelta=0;apply(true);}
     function reset(){scale=1;wheelDelta=0;apply(true);}
+    function wheelPixels(event){
+      if(event.deltaMode===1)return event.deltaY*16;
+      if(event.deltaMode===2)return event.deltaY*Math.max(window.innerHeight,1);
+      return event.deltaY;
+    }
+    function canScrollVertically(element,delta){
+      if(delta<0)return element.scrollTop>1;
+      return element.scrollTop+element.clientHeight<element.scrollHeight-1;
+    }
+    function installWheelScrollHandoff(){
+      window.addEventListener('wheel',function(event){
+        if(event.defaultPrevented||event.ctrlKey||event.metaKey||event.altKey||event.shiftKey)return;
+        if(Math.abs(event.deltaY)<0.01||Math.abs(event.deltaX)>Math.abs(event.deltaY))return;
+        var target=event.target instanceof Element?event.target:null;
+        if(!target||target.closest('textarea,select,option,input[type="number"],[contenteditable="true"]'))return;
+        var delta=wheelPixels(event),blocked=false,node=target;
+        while(node&&node!==document.body&&node!==document.documentElement){
+          var style=getComputedStyle(node);
+          var vertical=/^(auto|scroll|overlay)$/.test(style.overflowY)&&node.scrollHeight>node.clientHeight+1;
+          if(vertical){
+            if(canScrollVertically(node,delta)){
+              if(blocked){event.preventDefault();node.scrollTop+=delta;}
+              return;
+            }
+            blocked=true;
+          }
+          var horizontal=/^(auto|scroll|overlay)$/.test(style.overflowX);
+          if(horizontal&&(node.scrollWidth>node.clientWidth+1||/^(hidden|clip)$/.test(style.overflowY)))blocked=true;
+          node=node.parentElement;
+        }
+        if(!blocked)return;
+        var page=document.scrollingElement||document.documentElement;
+        if(!canScrollVertically(page,delta))return;
+        event.preventDefault();page.scrollTop+=delta;
+      },{capture:true,passive:false});
+    }
     try{window.__cfInlinePageZoomControl={adjust:adjust,reset:reset};}catch(error){}
     window.addEventListener('wheel',function(event){
       if(!event.ctrlKey)return;
@@ -470,6 +577,7 @@ export function buildPageZoomClientScript(): string {
       event.preventDefault();event.stopPropagation();reset();
     },true);
     window.addEventListener('resize',function(){apply(false);});
+    installWheelScrollHandoff();
     apply(false);
   })()`;
 }
@@ -534,71 +642,177 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       var clone=block.cloneNode(true);
       Array.from(clone.querySelectorAll('.cf-inline-paragraph-toolbar,.cf-inline-paragraph-control,.cf-inline-paragraph-translation')).forEach(function(node){node.remove();});
       Array.from(clone.querySelectorAll('.MathJax_Preview,script,style')).forEach(function(node){node.remove();});
-      var walker=document.createTreeWalker(clone,NodeFilter.SHOW_TEXT),entries=[],pieces=[];
+      // tex-font-style-bf/it are ordinary Codeforces text formatting spans,
+      // not formulas. Protecting them used to exclude the entire bold
+      // Hard/Easy notice from translation. Real formulas are already covered
+      // by MathJax/mjx-container/tex-span.
+      var protectedSelector='pre,code,.MathJax,mjx-container,.tex-span,img,svg,table';
+      var scopeSelector='p,li,blockquote,h1,h2,h3,h4,h5,h6,.header>.title,.section-title';
+      var scopes=Array.from(clone.querySelectorAll(scopeSelector)).filter(function(scope){
+        return !scope.closest('pre,code,.sample-tests')&&!scope.parentElement.closest(scopeSelector);
+      });
+      if(clone.matches&&clone.matches(scopeSelector))scopes.unshift(clone);
+      if(!scopes.length&&/[A-Za-z]{2}/.test(clone.textContent||''))scopes.push(clone);
+      var covered=new Set(scopes),walker=document.createTreeWalker(clone,NodeFilter.SHOW_TEXT),extra=[];
       while(walker.nextNode()){
-        var node=walker.currentNode,parent=node.parentElement;
-        if(!parent||parent.closest('pre,code,script,style,.MathJax,.MathJax_Preview,mjx-container,.tex-span,[class*="tex-font-style"]'))continue;
-        var raw=node.nodeValue||'',leading=(raw.match(/^\\s*/)||[''])[0],trailing=(raw.match(/\\s*$/)||[''])[0];
-        var core=raw.slice(leading.length,raw.length-trailing.length);
-        if(!/[A-Za-z]{2}/.test(core))continue;
-        if(dictionary[core.trim()])continue;
-        var parts=core.match(/[\\s\\S]{1,2200}/g)||[];
-        var entry={node:node,leading:leading,trailing:trailing,pieces:[]};
-        parts.forEach(function(text){var piece={id:pieces.length,text:text,translation:''};entry.pieces.push(piece);pieces.push(piece);});
-        entries.push(entry);
+        var textNode=walker.currentNode,parent=textNode.parentElement;
+        if(!parent||!/[A-Za-z]{2}/.test(textNode.nodeValue||'')||parent.closest(protectedSelector+',.sample-tests'))continue;
+        if(scopes.some(function(scope){return scope.contains(textNode);}))continue;
+        if(dictionary[(textNode.nodeValue||'').trim()])continue;
+        var nearest=parent;
+        if(!covered.has(nearest)){covered.add(nearest);extra.push(nearest);}
       }
-      if(!pieces.length)return clone;
-      function useful(source,translated){
-        var clean=function(value){return String(value||'').replace(/⟦CFI\d+⟧/g,'').replace(/\s+/g,' ').trim();};
-        var original=clean(source),candidate=clean(translated),sourceLatin=(original.match(/[A-Za-z]/g)||[]).length;
-        if(!candidate)return false;
-        if(candidate.toLowerCase()===original.toLowerCase()&&sourceLatin>=12)return false;
-        if(sourceLatin<24)return true;
-        var translatedLatin=(candidate.match(/[A-Za-z]/g)||[]).length,translatedHan=(candidate.match(/[\u3400-\u9fff]/g)||[]).length;
-        return translatedHan>=2||translatedLatin<sourceLatin*0.7;
-      }
-      function marker(piece){return '⟦CFI'+piece.id+'⟧';}
-      var groups=[],group=[],groupLength=0;
-      pieces.forEach(function(piece){
-        var extra=piece.text.length+(group.length?marker(piece).length:0);
-        if(group.length&&groupLength+extra>2800){groups.push(group);group=[];groupLength=0;extra=piece.text.length;}
-        group.push(piece);groupLength+=extra;
-      });
-      if(group.length)groups.push(group);
-      var payloads=groups.map(function(items){return items.map(function(piece,index){return(index?marker(piece):'')+piece.text;}).join('');});
-      var translatedGroups=await requestTranslationItems(payloads),fallback=[];
-      groups.forEach(function(items,groupIndex){
-        var remaining=translatedGroups[groupIndex]||'',segments=[],valid=true;
-        for(var index=1;index<items.length;index++){
-          var nextMarker=marker(items[index]),position=remaining.indexOf(nextMarker);
-          if(position<0){valid=false;break;}
-          segments.push(remaining.slice(0,position));remaining=remaining.slice(position+nextMarker.length);
-        }
-        if(valid){
-          segments.push(remaining);
-          items.forEach(function(piece,index){
-            if(useful(piece.text,segments[index]))piece.translation=segments[index];
-            else fallback.push(piece);
-          });
-        }else fallback.push.apply(fallback,items);
-      });
-      if(fallback.length){
-        var fallbackTranslations=await requestTranslationItems(fallback.map(function(piece){return piece.text;}));
-        fallback.forEach(function(piece,index){
-          if(!useful(piece.text,fallbackTranslations[index]))throw new Error('在线翻译仍返回英文原文，请稍后重试');
-          piece.translation=fallbackTranslations[index];
+      scopes=scopes.concat(extra).filter(function(scope,index,all){return all.indexOf(scope)===index;});
+      function versionNoticeContainer(){
+        var all=[];
+        if(clone.nodeType===Node.ELEMENT_NODE)all.push(clone);
+        clone.querySelectorAll('p,div,blockquote,strong,b').forEach(function(element){all.push(element);});
+        var matches=all.filter(function(element){
+          var text=(element.textContent||'').replace(/[\u00ad\u200b-\u200d\ufeff]/g,'').replace(/[\\t\\r\\n ]+/g,' ').trim();
+          var starts=/(?:^|[^A-Za-z])this[ ]+is[ ]+(?:the[ ]+)?(?:hard|easy)[ ]+version(?:[^A-Za-z]|$)/i.test(text);
+          return starts&&/(?:hack|both versions|all versions)/i.test(text);
         });
+        if(!matches.length)return null;
+        matches.sort(function(left,right){return (left.textContent||'').length-(right.textContent||'').length;});
+        return matches[0];
       }
-      entries.forEach(function(entry){entry.node.nodeValue=entry.leading+entry.pieces.map(function(piece){return piece.translation;}).join('')+entry.trailing;});
+      var specialVersionScope=versionNoticeContainer();
+      if(specialVersionScope&&!scopes.includes(specialVersionScope)){
+        scopes=scopes.filter(function(scope){return !specialVersionScope.contains(scope)&&!scope.contains(specialVersionScope);});
+        scopes.unshift(specialVersionScope);
+      }
+      function useful(source,translated){
+        var clean=function(value){return String(value||'').replace(/\\[\\[\\s*93\\s*\\d+\\s*7\\s*\\d+\\s*(?:39|49)\\s*\\]\\]/g,'').replace(/\\s+/g,' ').trim();};
+        var original=clean(source),candidate=clean(translated),sourceLatin=(original.match(/[A-Za-z]/g)||[]).length;
+        if(!candidate||candidate.toLowerCase()===original.toLowerCase()&&sourceLatin>=12)return false;
+        var translatedLatin=(candidate.match(/[A-Za-z]/g)||[]).length,translatedHan=(candidate.match(/[\u3400-\u9fff]/g)||[]).length;
+        if(sourceLatin>=12&&translatedHan<2)return false;
+        if(translatedHan>=2&&/(?:\\b[A-Za-z]{2,}\\b[\\s,;:'"()\\-–—]*){6,}/.test(candidate))return false;
+        return sourceLatin<40||translatedLatin<sourceLatin*.72;
+      }
+      function soleFormattingChild(scope){
+        var meaningful=Array.from(scope.childNodes).filter(function(node){return node.nodeType===Node.ELEMENT_NODE||node.nodeType===Node.TEXT_NODE&&(node.nodeValue||'').trim();});
+        return meaningful.length===1&&meaningful[0].nodeType===Node.ELEMENT_NODE&&meaningful[0].matches('strong,b,em,i')?meaningful[0]:scope;
+      }
+      function prepare(scope,serial,alternate){
+        var target=soleFormattingChild(scope),protectedNodes=[],parts=[];
+        function visit(node){
+          if(node.nodeType===Node.TEXT_NODE){parts.push(node.nodeValue||'');return;}
+          if(node.nodeType!==Node.ELEMENT_NODE)return;
+          var element=node;
+          if(element.matches('.MathJax_Preview,script,style'))return;
+          if(element.matches(protectedSelector)){
+            var id=protectedNodes.length;protectedNodes.push(element.cloneNode(true));
+            parts.push(' '+tokenValue(serial,id,alternate)+' ');return;
+          }
+          if(element.tagName==='BR')parts.push('\\n');
+          else Array.from(element.childNodes).forEach(visit);
+        }
+        Array.from(target.childNodes).forEach(visit);
+        protectedNodes.push(document.createTextNode(''));
+        parts.push(' '+tokenValue(serial,protectedNodes.length-1,alternate));
+        return {scope:scope,target:target,source:parts.join('').replace(/[ \\t]+/g,' ').trim(),nodes:protectedNodes,serial:serial,alternate:alternate};
+      }
+      function tokenValue(serial,index,alternate){return '[[93'+serial+'7'+index+(alternate?'49':'39')+']]';}
+      function token(unit,index){return tokenValue(unit.serial,index,unit.alternate);}
+      function tokenMatch(unit,index,value,cursor){
+        var expected=token(unit,index).replace(/\\D/g,''),pattern=/[\\[［【]+\\s*([\\d\\s]+?)\\s*[\\]］】]+/g,match,tail=String(value).slice(cursor);
+        while((match=pattern.exec(tail))){if(match[1].replace(/\\s/g,'')===expected)return {index:cursor+match.index,length:match[0].length};}
+        return null;
+      }
+      function validTokens(unit,translated){
+        var cursor=0;
+        for(var index=0;index<unit.nodes.length;index++){var match=tokenMatch(unit,index,translated,cursor);if(!match)return false;cursor=match.index+match.length;}
+        return true;
+      }
+      function apply(unit,translated){
+        var fragment=document.createDocumentFragment(),remaining=String(translated),cursor=0;
+        unit.nodes.forEach(function(node,index){
+          var match=tokenMatch(unit,index,remaining,cursor);
+          fragment.appendChild(document.createTextNode(remaining.slice(cursor,match.index)));
+          fragment.appendChild(node);cursor=match.index+match.length;
+        });
+        fragment.appendChild(document.createTextNode(remaining.slice(cursor)));
+        unit.target.replaceChildren(fragment);
+      }
+      function localVersionNotice(unit){
+        var source=unit.source.replace(/[\u00ad\u200b-\u200d\ufeff]/g,'').replace(/\\s+/g,' ').trim();
+        var match=source.match(/(?:^|[^A-Za-z])this[ ]+is[ ]+(?:the[ ]+)?(hard|easy)[ ]+version(?:[^A-Za-z]|$)/i);
+        // Codeforces uses several different wrappers for this visually-bold
+        // notice and may split them around MathJax. The wording itself is the
+        // stable discriminator, so do not make local translation depend on a
+        // particular <strong>/<b> nesting shape.
+        if(!match)return '';
+        var actualCount=Math.max(0,unit.nodes.length-1),variables=[];
+        for(var index=0;index<actualCount;index++)variables.push(token(unit,index));
+        var variableText=variables.join('、'),kind=match[1].toLowerCase()==='hard'?'困难版本':'简单版本';
+        var result='这是该题的'+kind+'。';
+        var initialArray=/set of allowed values for (?:the )?initial array/i.test(source);
+        var markerPattern='(\\\\[\\\\[[ ]*93[ ]*[0-9]+[ ]*7[ ]*[0-9]+[ ]*(?:39|49)[ ]*\\\\]\\\\])';
+        var operationVariable=new RegExp('and for[ ]+'+markerPattern+'[ ]+in operations? of type[ ]*([0-9]+)','i').exec(source);
+        var integerRange=new RegExp('any integers? in[ ]+'+markerPattern,'i').exec(source);
+        if(initialArray&&operationVariable){
+          result+='两个版本的唯一区别在于初始数组以及操作 '+operationVariable[2]+' 中 '+operationVariable[1]+' 的允许取值范围。';
+          if(integerRange)result+='在此版本中，这些值可以是 '+integerRange[1]+' 范围内的任意整数。';
+        }
+        else if(/constraints?[^.]*larger/i.test(source))result+=variableText?'与其他版本相比，此版本中，'+variableText+' 的约束更大。':'与其他版本相比，此版本的约束更大。';
+        else if(/constraints?[^.]*smaller/i.test(source))result+=variableText?'与其他版本相比，此版本中，'+variableText+' 的约束更小。':'与其他版本相比，此版本的约束更小。';
+        else if(/allowed (?:range|values?)|set of allowed values/i.test(source))result+='不同版本的区别在于'+(variableText?variableText+'的':'')+'允许取值范围不同。';
+        else result+='不同版本之间的约束范围有所区别。';
+        if(/both versions?[^.]*solved|solved[^.]*both versions?/i.test(source))result+='只有两个版本都已解决后，才可以进行 Hack。';
+        else if(/all versions?[^.]*solved|solved[^.]*all versions?/i.test(source))result+='只有解决本题的所有版本后，才可以进行 Hack。';
+        else if(/hack/i.test(source))result+='满足题目所述的版本完成条件后，才可以进行 Hack。';
+        return result+token(unit,unit.nodes.length-1);
+      }
+      var units=scopes.map(function(scope,index){return prepare(scope,index,false);}).filter(function(unit){
+        var prose=unit.source.replace(/\\[\\[\\s*93\\s*\\d+\\s*7\\s*\\d+\\s*(?:39|49)\\s*\\]\\]/g,'').trim();
+        return /[A-Za-z]{2}/.test(prose)&&!dictionary[prose];
+      });
+      units=units.filter(function(unit){
+        var local=localVersionNotice(unit);if(!local)return true;
+        var preserveBold=!unit.target.matches('strong,b,.tex-font-style-bf')&&!!unit.scope.querySelector('strong,b,.tex-font-style-bf');
+        apply(unit,local);
+        if(preserveBold){var bold=document.createElement('strong');while(unit.target.firstChild)bold.appendChild(unit.target.firstChild);unit.target.appendChild(bold);}
+        return false;
+      });
+      if(!units.length)return clone;
+      var translations=await requestTranslationItems(units.map(function(unit){return unit.source;})),retry=[];
+      units.forEach(function(unit,index){if(!useful(unit.source,translations[index])||!validTokens(unit,translations[index]))retry.push({unit:unit,index:index});});
+      if(retry.length){
+        var retryUnits=retry.map(function(entry){return prepare(entry.unit.scope,entry.index,true);});
+        var retryTranslations=await requestTranslationItems(retryUnits.map(function(unit){return unit.source;}));
+        var fragmentFallback=[];
+        retry.forEach(function(entry,index){
+          var retryUnit=retryUnits[index],translated=retryTranslations[index];
+          if(!useful(retryUnit.source,translated)||!validTokens(retryUnit,translated))fragmentFallback.push({entry:entry,unit:retryUnit});
+          else{entry.unit=retryUnit;translations[entry.index]=translated;}
+        });
+        if(fragmentFallback.length){
+          var fragments=[];
+          fragmentFallback.forEach(function(fallback){
+            var source=fallback.unit.source,cursor=0,segments=[];
+            fallback.unit.nodes.forEach(function(node,index){var match=tokenMatch(fallback.unit,index,source,cursor);segments.push(source.slice(cursor,match.index));cursor=match.index+match.length;});
+            segments.push(source.slice(cursor));fallback.segments=segments;
+            segments.forEach(function(segment,index){if(/[A-Za-z]{2}/.test(segment))fragments.push({fallback:fallback,index:index,text:segment});});
+          });
+          var fragmentTranslations=fragments.length?await requestTranslationItems(fragments.map(function(fragment){return fragment.text;})):[];
+          fragments.forEach(function(fragment,index){fragment.fallback.segments[fragment.index]=useful(fragment.text,fragmentTranslations[index])?fragmentTranslations[index]:fragment.text;});
+          fragmentFallback.forEach(function(fallback){
+            var rebuilt='';fallback.unit.nodes.forEach(function(node,index){rebuilt+=fallback.segments[index]+token(fallback.unit,index);});rebuilt+=fallback.segments[fallback.segments.length-1];
+            fallback.entry.unit=fallback.unit;translations[fallback.entry.index]=rebuilt;
+          });
+        }
+      }
+      units.forEach(function(unit,index){var replacement=retry.find(function(entry){return entry.index===index;});apply(replacement?replacement.unit:unit,translations[index]);});
       return clone;
     }
     async function translateBlockReliably(block){
       // Bing's public translator endpoint treats HTML as plain text. Even when
       // it happens to preserve our data attributes, it can silently replace
       // the surrounding prose with fragments such as repeated "s" characters.
-      // Translating text nodes only keeps the original DOM, MathJax nodes and
-      // code samples untouched and also makes a structurally valid but corrupt
-      // HTML response impossible to accept as a successful translation.
+      // Translate one natural paragraph at a time. Formula/code nodes are
+      // restored from the original DOM after translation, so inline MathJax
+      // cannot split one sentence into dozens of slow, incomplete requests.
       return translateTextNodesSafely(block);
     }
     function parseProblemRoute(){
@@ -659,17 +873,37 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       return String(text||'').replace(/\\u00a0/g,' ').replace(/\\r\\n?/g,'\\n').replace(/\\n+$/,'');
     }
     async function copySampleText(text){
-      if(navigator.clipboard&&typeof navigator.clipboard.writeText==='function'){
-        try{await navigator.clipboard.writeText(text);return;}catch(error){}
-      }
+      try{
+        var response=await fetch('/__cf_inline/clipboard',{method:'POST',headers:{'Content-Type':'application/json','X-CF-Inline':'clipboard'},body:JSON.stringify({text:text})});
+        if(response.ok)return;
+      }catch(error){}
       var holder=document.createElement('textarea');holder.value=text;holder.readOnly=true;
       holder.style.cssText='position:fixed;left:-9999px;top:0;opacity:0';document.body.appendChild(holder);
       holder.focus();holder.select();holder.setSelectionRange(0,holder.value.length);
       var copied=false;try{copied=document.execCommand('copy');}finally{holder.remove();}
+      if(copied)return;
+      if(navigator.clipboard&&typeof navigator.clipboard.writeText==='function'){
+        try{await navigator.clipboard.writeText(text);return;}catch(error){}
+      }
       if(!copied)throw new Error('浏览器拒绝访问剪贴板');
     }
     function installSampleCopyButtons(root){
       if(!root)return;
+      if(!document.documentElement.dataset.cfInlineSampleCopyHandler){
+        document.documentElement.dataset.cfInlineSampleCopyHandler='1';
+        document.addEventListener('click',async function(event){
+          var target=event.target;
+          var button=target&&target.closest?target.closest('.cf-inline-sample-copy'):null;
+          if(!button)return;
+          event.preventDefault();event.stopPropagation();if(button.disabled)return;
+          var section=button.closest('.sample-tests .input,.sample-tests .output'),pre=section&&section.querySelector('pre');
+          if(!pre){button.textContent='复制失败';button.classList.add('is-error');return;}
+          button.disabled=true;button.classList.remove('is-error');
+          try{await copySampleText(readSampleText(pre));button.textContent='已复制';}
+          catch(error){button.textContent='复制失败';button.classList.add('is-error');button.title=String(error&&error.message||error);}
+          finally{setTimeout(function(){button.disabled=false;button.textContent='复制';button.classList.remove('is-error');button.title='复制这个样例';},1200);}
+        },true);
+      }
       var sections=[];
       if(root.nodeType===Node.ELEMENT_NODE&&root.matches&&root.matches('.sample-tests .input,.sample-tests .output'))sections.push(root);
       if(root.nodeType===Node.ELEMENT_NODE&&root.closest){var parentSection=root.closest('.sample-tests .input,.sample-tests .output');if(parentSection)sections.push(parentSection);}
@@ -677,17 +911,10 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         root.querySelectorAll('.sample-tests .input,.sample-tests .output').forEach(function(section){sections.push(section);});
       }
       Array.from(new Set(sections)).forEach(function(section){
-        if(section.dataset.cfInlineSampleCopy)return;
         var title=section.querySelector('.title'),pre=section.querySelector('pre');if(!title||!pre)return;
+        if(Array.from(title.children).some(function(child){return child.classList.contains('cf-inline-sample-copy');})){section.dataset.cfInlineSampleCopy='1';return;}
         section.dataset.cfInlineSampleCopy='1';
         var button=document.createElement('button');button.type='button';button.className='cf-inline-sample-copy';button.textContent='复制';button.title='复制这个样例';
-        button.addEventListener('click',async function(event){
-          event.preventDefault();event.stopPropagation();if(button.disabled)return;
-          button.disabled=true;button.classList.remove('is-error');
-          try{await copySampleText(readSampleText(pre));button.textContent='已复制';}
-          catch(error){button.textContent='复制失败';button.classList.add('is-error');button.title=String(error&&error.message||error);}
-          finally{setTimeout(function(){button.disabled=false;button.textContent='复制';button.classList.remove('is-error');button.title='复制这个样例';},1200);}
-        });
         title.appendChild(button);
       });
     }
@@ -961,10 +1188,11 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
             if(/[A-Za-z]{2}/.test(block.textContent||''))prepared.push({index:index,block:block});
           });
           if(!prepared.length) throw new Error('当前题面不需要翻译');
-          var translatedByIndex=new Map();
+          var translatedByIndex=new Map(),translationErrors=[];
           var nextPrepared=0;
-          async function worker(){while(nextPrepared<prepared.length){var entry=prepared[nextPrepared++];translatedByIndex.set(entry.index,await translateBlockReliably(entry.block,entry.index));}}
+          async function worker(){while(nextPrepared<prepared.length){var entry=prepared[nextPrepared++];try{translatedByIndex.set(entry.index,await translateBlockReliably(entry.block,entry.index));}catch(error){translationErrors.push(String(error&&error.message||error));}}}
           await Promise.all([worker(),worker(),worker(),worker(),worker(),worker()]);
+          if(!translatedByIndex.size)throw new Error(translationErrors[0]||'在线翻译暂时不可用');
           translatedWrap=document.createElement('section'); translatedWrap.className='cf-inline-translated-wrap';
           var heading=document.createElement('div'); heading.className='cf-inline-translated-heading'; heading.textContent='中文翻译';
           var translatedStatement=document.createElement('div'); translatedStatement.className='problem-statement cf-inline-translated-statement';
@@ -972,7 +1200,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           translatedWrap.appendChild(heading); translatedWrap.appendChild(translatedStatement);
           statement.parentNode.insertBefore(translatedWrap,statement.nextSibling);
           localize(translatedStatement);
-          button.textContent='隐藏中文译文'; status.textContent='中文译文显示在英文原题下方；英文原题保持不变';
+          button.textContent='隐藏中文译文'; status.textContent=translationErrors.length?'中文译文已生成；少数暂未译出的段落保留英文，可点击重试题面':'中文译文显示在英文原题下方；英文原题保持不变';
         }catch(error){status.textContent='翻译失败：'+String(error&&error.message||error);}
         finally{busy=false;button.disabled=false;}
       }

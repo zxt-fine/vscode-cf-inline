@@ -45,7 +45,6 @@
 - 自动读取 Codeforces 当前可用语言，并按文件扩展名或用户偏好选择默认语言。
 - 提交由真实 Edge 官方页面生成实时校验字段；若 Codeforces 临时要求额外验证，会打开普通大小的 Edge 验证页，完成后可直接重试。
 - 提交后持续刷新提交记录，在页面内显示排队、评测中、Accepted、Wrong Answer 等状态。
-- 另提供“提交当前编辑器文件”命令作为可选快捷入口。
 
 ## 系统要求
 
@@ -96,7 +95,6 @@ npm run package
 | `Codeforces Inline: 打开 Codeforces 翻译浏览器` | 打开默认浏览界面；需要时恢复或建立 Edge 会话 |
 | `Codeforces Inline: 在 VS Code 集成浏览器中打开` | 直接使用 VS Code 集成浏览器显示页面 |
 | `Codeforces Inline: 打开旧版内嵌面板` | 使用旧版 iframe 内嵌界面 |
-| `Codeforces Inline: 可选 · 提交当前编辑器文件` | 将当前代码文件提交到对应题目 |
 | `Codeforces Inline: 登录并连接 Edge 会话` | 打开登录连接页面 |
 
 ## 配置

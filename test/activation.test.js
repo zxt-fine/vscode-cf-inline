@@ -20,7 +20,6 @@ test('relies on VS Code generated activation events for contributed commands', (
     'cfInline.open',
     'cfInline.openIntegratedBrowser',
     'cfInline.openPanel',
-    'cfInline.submit',
     'cfInline.openLogin',
   ]);
   const containerId = manifest.contributes.viewsContainers.activitybar[0].id;
@@ -40,7 +39,7 @@ test('registers a native Codeforces activity-bar sidebar without launching Edge'
   assert.match(sidebarSource, /executeCommand\('cfInline\.open'\)/);
   assert.match(sidebarSource, /'打开 Codeforces 浏览器'/);
   assert.match(sidebarSource, /'重新连接 Edge'/);
-  assert.match(sidebarSource, /'提交当前编辑器代码'/);
+  assert.doesNotMatch(sidebarSource, /提交当前编辑器代码|cfInline\.submit/);
   assert.match(sidebarSource, /setInterval/);
   assert.match(sidebarSource, /refreshSessionHealth/);
   assert.doesNotMatch(sidebarSource, /loginWithOfficialBrowser|captureCodeforcesSession/);

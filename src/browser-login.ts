@@ -235,7 +235,7 @@ export async function captureCodeforcesSession(
             temporaryProfile
           );
           await transport.verifySession((message) => options.onStatus?.(message));
-          options.onStatus?.('账号和四个入口验证完成，正在最小化 Edge 并建立安全会话…');
+          options.onStatus?.('账号验证完成，正在最小化 Edge 并建立安全会话…');
           await transport.minimizeWindow();
           keepBrowserAlive = true;
           return {
@@ -275,6 +275,22 @@ export async function captureCodeforcesSession(
   }
 }
 
+function warmTranslationSession(transport: CfUpstreamTransport): void {
+  if (!transport.translateHtmlItems) {
+    return;
+  }
+  // Do not put Bing session establishment on the first problem's critical
+  // path. This runs only after Edge login has already been requested and
+  // verified; failures remain silent because normal translation still has its
+  // own provider fallback and error reporting.
+  const timer = setTimeout(() => {
+    void transport
+      .translateHtmlItems!(['Codeforces translation service warm-up.'])
+      .catch(() => undefined);
+  }, 1200);
+  timer.unref();
+}
+
 export function loginWithOfficialBrowser(
   context: vscode.ExtensionContext,
   proxy: CfProxy,
@@ -293,6 +309,9 @@ export function loginWithOfficialBrowser(
   startActiveLoginStatusBar();
   const login = Promise.resolve(vscode.window.withProgress(
     {
+      // VS Code renders notification progress as an overlay. It does not
+      // resize or navigate the Codeforces editor, so maximized/fullscreen
+      // browser state remains independent from the visible login reminder.
       location: vscode.ProgressLocation.Notification,
       title: 'Codeforces 登录',
       cancellable: true,
@@ -311,6 +330,7 @@ export function loginWithOfficialBrowser(
       try {
         reportActiveLoginStatus('验证完成，正在连接 Codeforces 会话…');
         proxy.attachBrowserSession(session.cookies, session.userAgent, session.transport);
+        warmTranslationSession(session.transport);
         reportActiveLoginStatus('Codeforces 会话已连接，正在打开页面…');
       } catch (err) {
         await session.transport.dispose();
@@ -365,6 +385,7 @@ export function restoreSavedBrowserSession(
         timeoutMs: 25_000,
       });
       proxy.attachBrowserSession(session.cookies, session.userAgent, session.transport);
+      warmTranslationSession(session.transport);
       return true;
     } catch {
       if (session) {
@@ -554,41 +575,21 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
 
   async verifySession(onStatus?: (message: string) => void): Promise<void> {
     await this.waitForCodeforcesDocument();
-
-    const checks = [
-      [MY_GROUPS_PATH, '我的群组'],
-      ['/contests', '比赛'],
-      ['/gyms', '训练营'],
-      ['/problemset', '题库'],
-    ] as const;
-    onStatus?.('正在限流预检四个极速入口，避免短时间请求过多…');
-    let completed = 0;
-    let nextIndex = 0;
-    const worker = async (): Promise<void> => {
-      while (nextIndex < checks.length) {
-        const [pathname, label] = checks[nextIndex++];
-        const requestUrl = new URL(pathname, 'https://codeforces.com').toString();
-        const response = await this.requestOnce({
-          url: requestUrl,
-          method: 'GET',
-          headers: { Accept: 'text/html,application/xhtml+xml' },
-          body: Buffer.alloc(0),
-        });
-        assertUsableCodeforcesPage(response, label);
-        assertAuthenticatedCodeforcesPage(response, label);
-        if (pathname === MY_GROUPS_PATH && !isPersonalGroupsUrl(response.finalUrl)) {
-          throw new Error('“我的群组”被重定向到全部群组，尚未确认个人群组页面');
-        }
-        this.prefetchedDocuments.set(requestUrl, {
-          response,
-          expiresAt: Date.now() + 45_000,
-        });
-        completed += 1;
-        onStatus?.(`预处理进度 ${completed}/${checks.length}：${label} 已就绪…`);
-      }
-    };
-    await Promise.all([worker(), worker()]);
-    onStatus?.('常用页面预处理完成，首次打开将直接使用预加载结果…');
+    onStatus?.('正在确认账号和“我的群组”入口…');
+    const requestUrl = new URL(MY_GROUPS_PATH, 'https://codeforces.com').toString();
+    const response = await this.requestOnce({
+      url: requestUrl,
+      method: 'GET',
+      headers: { Accept: 'text/html,application/xhtml+xml' },
+      body: Buffer.alloc(0),
+    });
+    assertUsableCodeforcesPage(response, '我的群组');
+    assertAuthenticatedCodeforcesPage(response, '我的群组');
+    if (!isPersonalGroupsUrl(response.finalUrl)) {
+      throw new Error('“我的群组”被重定向到全部群组，尚未确认个人群组页面');
+    }
+    this.prefetchedDocuments.set(requestUrl, { response, expiresAt: Date.now() + 45_000 });
+    onStatus?.('账号验证完成；其他入口将在需要时加载，避免触发额外验证。');
   }
 
   async minimizeWindow(): Promise<void> {
@@ -659,7 +660,7 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
     }
     return translateHtmlItems(items, async (translationRequest: TranslationHttpRequest) => {
       const translationUrl = new URL(translationRequest.url);
-      if (translationUrl.hostname.toLowerCase() === 'cn.bing.com') {
+      if (['cn.bing.com', 'translate.googleapis.com'].includes(translationUrl.hostname.toLowerCase())) {
         const response = await directHttpRequest({
           url: translationRequest.url,
           method: translationRequest.method,
@@ -669,12 +670,7 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
         });
         return { statusCode: response.statusCode, body: response.body };
       }
-      const response = await this.requestOnce(
-        translationRequest,
-        this.pageClient,
-        true
-      );
-      return { statusCode: response.statusCode, body: response.body };
+      throw new Error(`拒绝访问未授权的翻译服务：${translationUrl.hostname}`);
     });
   }
 

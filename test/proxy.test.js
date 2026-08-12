@@ -488,6 +488,32 @@ test('protects the local translation endpoint from unrelated browser requests', 
   assert.equal(foreignPost.statusCode, 403);
 });
 
+test('writes sample text through the protected VS Code clipboard bridge', async (t) => {
+  let copied = '';
+  const proxy = new CfProxy({
+    baseUrl: 'https://codeforces.com',
+    defaultPath: '/problemset/problem/1/A',
+    port: 0,
+    writeClipboardText: async (text) => { copied = text; },
+  });
+  await proxy.start();
+  t.after(() => proxy.stop());
+
+  const rejected = await localRequest(`${proxy.origin}/__cf_inline/clipboard`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: Buffer.from(JSON.stringify({ text: '1 2\n3' })),
+  });
+  assert.equal(rejected.statusCode, 403);
+  const accepted = await localRequest(`${proxy.origin}/__cf_inline/clipboard`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CF-Inline': 'clipboard' },
+    body: Buffer.from(JSON.stringify({ text: '1 2\n3' })),
+  });
+  assert.equal(accepted.statusCode, 200);
+  assert.equal(copied, '1 2\n3');
+});
+
 test('routes protected submissions through the official Edge page transport', async (t) => {
   const transport = new FakeTransport((request) => request.method === 'BROWSER_SUBMIT'
     ? response('<script>Codeforces.showMessage("Solution to the problem A has been submitted successfully")</script>', 'https://codeforces.com/contest/1/my')

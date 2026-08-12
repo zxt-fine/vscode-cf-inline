@@ -4,7 +4,6 @@ import { prefersIntegratedBrowser, openInIntegratedBrowser } from './integrated-
 import { CfPanel } from './panel';
 import { CfProxy } from './proxy';
 import { registerCfSidebar } from './sidebar';
-import { submitCurrentFile } from './submit';
 
 let proxy: CfProxy | undefined;
 
@@ -22,6 +21,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     localizeInterface: config.get<boolean>('localizeInterface') ?? true,
     autoTranslateStatements: config.get<boolean>('autoTranslateStatements') ?? true,
     fastMode: config.get<boolean>('fastMode') ?? true,
+    writeClipboardText: async (text) => { await vscode.env.clipboard.writeText(text); },
   });
   await proxy.start();
 
@@ -77,16 +77,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand('cfInline.openPanel', () => {
       CfPanel.createOrShow(context, proxy!);
-    }),
-    vscode.commands.registerCommand('cfInline.submit', async () => {
-      if (!proxy!.isLoggedIn() || !proxy!.isSessionReady()) {
-        CfPanel.createOrShow(context, proxy!);
-        void vscode.window.showInformationMessage(
-          '提交前需要连接 Codeforces。请在插件页面点击登录按钮；登录完成后不要关闭 Edge。'
-        );
-        return;
-      }
-      await submitCurrentFile(context, proxy!);
     }),
     vscode.commands.registerCommand('cfInline.openLogin', () => {
       CfPanel.createOrShow(context, proxy!);

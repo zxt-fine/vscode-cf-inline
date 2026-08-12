@@ -71,7 +71,6 @@ export class CfSidebarProvider implements vscode.TreeDataProvider<CfSidebarItem>
     const primaryActions = connected
       ? [
           this.action('打开 Codeforces 浏览器', 'globe', '默认进入极速模式', 'cfInline.open'),
-          this.action('提交当前编辑器代码', 'cloud-upload', '提交当前打开的代码文件', 'cfInline.submit'),
         ]
       : [
           this.action('重新连接 Edge', 'plug', '第一步：点击后完成登录', 'cfInline.openLogin'),

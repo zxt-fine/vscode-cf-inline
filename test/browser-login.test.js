@@ -99,6 +99,8 @@ test('keeps login progress visible in the global VS Code status bar', () => {
   assert.match(source, /sync~spin/);
   assert.match(source, /登录验证完成，会话已经连接/);
   assert.match(source, /登录失败/);
+  assert.match(source, /ProgressLocation\.Notification/);
+  assert.doesNotMatch(source, /toggleMaximizedPanel|toggleFullScreen|zenMode|navigateBack|closeActiveEditor/);
   assert.match(source, /已确认 Microsoft Edge/);
   assert.match(source, /插件专用受控配置/);
   assert.match(source, /扩展和同步保持关闭/);
@@ -120,14 +122,27 @@ test('labels translation failures separately from Codeforces transport failures'
   assert.match(source, /upstreamLabel/);
 });
 
-test('prechecks common pages with two workers and reuses the first document response', () => {
+test('keeps both translation providers off the Codeforces browser request queue', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'out', 'browser-login.js'), 'utf8');
-  assert.match(source, /Promise\.all\(\[worker\(\), worker\(\)\]\)/);
-  assert.match(source, /限流预检/);
-  assert.doesNotMatch(source, /\['\/', '主页'\]/);
+  assert.match(source, /'cn\.bing\.com', 'translate\.googleapis\.com'/);
+  assert.match(source, /拒绝访问未授权的翻译服务/);
+});
+
+test('verifies only My Groups and reuses that document without probing every entry', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'out', 'browser-login.js'), 'utf8');
+  assert.match(source, /正在确认账号和“我的群组”入口/);
+  assert.match(source, /其他入口将在需要时加载/);
+  assert.doesNotMatch(source, /正在限流预检四个极速入口/);
   assert.match(source, /prefetchedDocuments/);
   assert.match(source, /45_000|45000/);
-  assert.match(source, /常用页面预处理完成/);
+});
+
+test('warms the translation session only after a verified Edge session is attached', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'out', 'browser-login.js'), 'utf8');
+  assert.match(source, /function warmTranslationSession/);
+  assert.match(source, /Codeforces translation service warm-up/);
+  assert.match(source, /1200/);
+  assert.match(source, /attachBrowserSession[\s\S]{0,180}warmTranslationSession/);
 });
 
 test('submits through a live official Edge page instead of forging anti-bot parameters', () => {

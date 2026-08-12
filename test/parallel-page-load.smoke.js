@@ -35,6 +35,7 @@ async function main() {
     port: 0,
     localizeInterface: true,
     autoTranslateStatements: true,
+    writeClipboardText: async (text) => { proxy.syntheticClipboardText = text; },
   });
   proxy.attachBrowserSession(session.cookies, session.userAgent, session.transport);
   await proxy.start();
@@ -56,25 +57,52 @@ async function main() {
         throw new Error(`Synthetic localization controls did not render: ${bodyText || 'empty body'}`);
       }
       const translationToggle = rendered.pageState?.translationToggle;
-      if (!bodyText.includes('Hello problem statement.')
-        || !translationToggle?.translatedText.includes('你好，题目描述。')
-        || !translationToggle?.translatedText.includes('公式后的补充说明。')
-        || !translationToggle?.translatedText.includes('这是该题的困难版本')
-        || !translationToggle?.sameMathNode
-        || translationToggle.translatedMathText !== '2n rendered'
-        || translationToggle.translatedMathCount !== 1
-        || translationToggle.translatedMathPreviewCount !== 0
-        || translationToggle.translatedMathSourceCount !== 0
-        || translationToggle.translatedCodeText !== 'int x;'
-        || translationToggle.typesetCalls !== 0
-        || translationToggle.leakedMarker) {
-        throw new Error(`Repeated translation toggles damaged the statement: ${JSON.stringify(rendered.pageState?.translationToggle)}`);
+      const translationChecks = {
+        originalVisible: translationToggle?.statementText.includes('Hello problem statement.'),
+        firstParagraph: translationToggle?.translatedText.includes('你好，题目描述。'),
+        formulaParagraph: translationToggle?.translatedText.includes('公式后的补充说明。'),
+        hardParagraph: translationToggle?.translatedText.includes('这是该题的困难版本'),
+        hardParagraphVariables: translationToggle?.translatedText.includes('初始数组以及操作 1 中 x rendered 的允许取值范围'),
+        hardParagraphRange: translationToggle?.translatedText.includes('range rendered 范围内的任意整数'),
+        hardParagraphEnd: translationToggle?.translatedText.includes('只有两个版本都已解决后，才可以进行 Hack。'),
+        hardParagraphBold: translationToggle?.translatedHardTag === 'STRONG',
+        easyParagraph: translationToggle?.translatedText.includes('这是该题的简单版本。与其他版本相比，此版本的约束更小。'),
+        originalMathStable: translationToggle?.sameMathNode,
+        translatedMathText: translationToggle?.translatedMathText === '2n rendered',
+        translatedMathCount: translationToggle?.translatedMathCount === 3,
+        previewsRemoved: translationToggle?.translatedMathPreviewCount === 0,
+        sourcesRemoved: translationToggle?.translatedMathSourceCount === 0,
+        codeStable: translationToggle?.translatedCodeText === 'int x;',
+        originalSampleCopyButtons: translationToggle?.originalSampleCopyCount === 2,
+        translatedSampleCopyButtons: translationToggle?.translatedSampleCopyCount === 2,
+        translatedSampleCopyClickable: translationToggle?.translatedSampleCopyText === '已复制',
+        noRetypeset: translationToggle?.typesetCalls === 0,
+        noMarkerLeak: !translationToggle?.leakedMarker,
+        noBracketArtifact: !translationToggle?.leakedBracketArtifact,
+      };
+      if (Object.values(translationChecks).some((passed) => !passed)) {
+        throw new Error(`Repeated translation toggles damaged the statement: ${JSON.stringify({ translationChecks, translationToggle })}`);
       }
-      if (!session.transport.translationPayloads.some((item) => item.includes('⟦CFI')
+      const wheelHandoff = rendered.pageState?.wheelHandoff;
+      if (!wheelHandoff?.horizontalAdvancedPage
+        || !wheelHandoff.verticalAdvancedInner
+        || wheelHandoff.verticalMovedPageBeforeBoundary
+        || !wheelHandoff.verticalBoundaryAdvancedPage
+        || wheelHandoff.ctrlWheelMovedPage
+        || !wheelHandoff.ctrlWheelChangedZoom) {
+        throw new Error(`Wheel scroll handoff failed: ${JSON.stringify(wheelHandoff)}`);
+      }
+      if (!session.transport.translationPayloads.some((item) => item.includes('[[93')
         && item.includes('Hello problem statement.')
         && item.includes('Additional explanation after the formula.'))) {
-        throw new Error(`Adjacent text nodes were not combined into one translation request: ${JSON.stringify(session.transport.translationPayloads)}`);
+        throw new Error(`A formula split one natural paragraph into separate translation requests: ${JSON.stringify(session.transport.translationPayloads)}`);
       }
+      const hardRequests = session.transport.translationPayloads.filter((item) => item.includes('This is the hard version of the problem.'));
+      if (hardRequests.length !== 0) throw new Error(`The fixed bold version notice should be translated locally: ${JSON.stringify(hardRequests)}`);
+      const easyRequests = session.transport.translationPayloads.filter((item) => item.includes('This is the Easy version of the problem.'));
+      if (easyRequests.length !== 0) throw new Error(`The fixed easy-version notice should be translated locally: ${JSON.stringify(easyRequests)}`);
+      const formulaRequests = session.transport.translationPayloads.filter((item) => item.includes('Hello problem statement.'));
+      if (formulaRequests.length !== 1) throw new Error(`A successful natural paragraph should use one request: ${JSON.stringify(formulaRequests)}`);
       const paragraphTranslation = rendered.pageState?.paragraphTranslation;
       if (!paragraphTranslation?.hasControl
         || paragraphTranslation.statementControlCount !== 0
@@ -160,7 +188,8 @@ function syntheticSession() {
     <div style="font: 24px sans-serif; color: #123">Groups content is visible</div>
     <div id="globalEnglish" class="ttypography"><p>This is an English announcement outside the problem statement.</p><ol><li>First solver: tourist</li><li>Second solver: Benq</li></ol></div>
     <a id="linkedTopic" href="/blog/entry/1"><div id="linkedEnglish" class="ttypography"><h1>ICPC Challenge powered by Huawei</h1><p>By ICPCNews, 9 days ago.</p></div></a>
-    <section class="problem-statement"><div class="header"><div>time limit per test</div></div><div><p><strong>This is the hard version of the problem. The only difference between the two versions is the allowed range.</strong></p><p>Hello problem statement. <span class="MathJax_Preview"></span><span class="MathJax"><span>2n rendered</span></span><script type="math/tex">2n</script> Additional explanation after the formula.</p><code>int x;</code></div><div class="sample-tests"><div class="section-title">Examples</div><pre>1 2</pre></div></section></main></div>
+    <section class="problem-statement"><div class="header"><div>time limit per test</div></div><div><p class="version-note"><span class="tex-font-style-bf">This is the hard version of the problem. The only difference between the two versions is the set of allowed values for the initial array and for </span><span class="MathJax_Preview"></span><span class="MathJax"><span>x rendered</span></span><script type="math/tex">x</script><span class="tex-font-style-bf"> in operations of type 1. In this version, these values can be any integers in </span><span class="MathJax_Preview"></span><span class="MathJax"><span>range rendered</span></span><script type="math/tex">[-10^9,10^9]</script><span class="tex-font-style-bf">. You can make hacks only if both versions of the problem are solved.</span></p><p><strong>This is the Easy version of the problem. The constraints in this version are smaller.</strong></p><p>Hello problem statement. <span class="MathJax_Preview"></span><span class="MathJax"><span>2n rendered</span></span><script type="math/tex">2n</script> Additional explanation after the formula.</p><code>int x;</code></div><div class="sample-tests"><div class="section-title">Examples</div><div class="input"><div class="title">Input</div><pre><div class="test-example-line">1 2</div></pre></div><div class="output"><div class="title">Output</div><pre><div class="test-example-line">3</div></pre></div></div></section>
+    <div style="height:600px"></div><div id="wheel-horizontal" style="box-sizing:border-box;width:240px;height:70px;overflow-x:auto;overflow-y:hidden"><div style="width:900px;height:60px">Horizontal-only scroll fixture</div></div><div style="height:120px"></div><div id="wheel-vertical" style="box-sizing:border-box;width:240px;height:100px;overflow-y:auto"><div style="height:600px">Vertical scroll fixture</div></div><div style="height:800px"></div></main></div>
     <script>if (window.parent.frames.length > 0) { window.stop(); }</script>
     <footer>Rendered footer</footer></div>
   </body></html>`;
@@ -174,6 +203,7 @@ function syntheticSession() {
   const submissions = [];
   const translationPayloads = [];
   let hardVersionReturnedUnchanged = false;
+  let spacedMathMarkerReturned = false;
   const transport = {
       submissions,
       translationPayloads,
@@ -186,8 +216,9 @@ function syntheticSession() {
             hardVersionReturnedUnchanged = true;
             return html;
           }
-          return html
-            .replace('This is the hard version of the problem. The only difference between the two versions is the allowed range.', '这是该题的困难版本，两个版本的唯一区别是允许范围。')
+          let translated = html
+            .replace('This is the hard version of the problem. The only difference between the two versions is the set of allowed values for ', '这是该题的困难版本，两个版本的唯一区别是操作 1 中 ')
+            .replace(' in operations of type 1. You can make hacks only if both versions of the problem are solved.', ' 的允许取值范围。只有解决两个版本后才能进行攻击。')
             .replace('Hello problem statement.', '你好，题目描述。')
             .replace('Additional explanation after the formula.', '公式后的补充说明。')
             .replace('This is an English announcement outside the problem statement.', '这是一段英文公告，位于题目描述之外。')
@@ -196,6 +227,11 @@ function syntheticSession() {
             .replace('ICPC Challenge powered by Huawei', 'ICPC 挑战赛由华为提供支持')
             .replace('By ICPCNews, 9 days ago.', '由 ICPCNews 发布，9 天前。')
             .replace(/ data-cfi-protected="\d+"/g, '');
+          if (html.includes('Hello problem statement.') && !spacedMathMarkerReturned) {
+            spacedMathMarkerReturned = true;
+            translated = translated.replace(/\[\[(\d+)\]\]/g, (_, digits) => `【 ${digits.split('').join(' ')} 】`);
+          }
+          return translated;
         });
       },
       submitSolution: async (request) => {
@@ -310,19 +346,30 @@ async function renderInEdge(url) {
                   button.click();
                   await new Promise((resolve) => setTimeout(resolve, 120));
                 }
+                const translatedCopy = document.querySelector('.cf-inline-translated-statement .input .cf-inline-sample-copy');
+                if (translatedCopy) {
+                  document.execCommand = (command) => command === 'copy';
+                  translatedCopy.click();
+                  await new Promise((resolve) => setTimeout(resolve, 80));
+                }
                 return {
                   sameMathNode: document.querySelector('.MathJax') === math,
                   mathText: math.textContent,
                   codeText: document.querySelector('code')?.textContent,
-                  translatedMathText: document.querySelector('.cf-inline-translated-statement .MathJax')?.textContent,
+                  translatedMathText: Array.from(document.querySelectorAll('.cf-inline-translated-statement .MathJax')).at(-1)?.textContent,
                   translatedMathCount: document.querySelectorAll('.cf-inline-translated-statement .MathJax').length,
+                  translatedHardTag: document.querySelector('.cf-inline-translated-statement p')?.firstElementChild?.tagName,
                   translatedMathPreviewCount: document.querySelectorAll('.cf-inline-translated-statement .MathJax_Preview').length,
                   translatedMathSourceCount: document.querySelectorAll('.cf-inline-translated-statement script[type^="math/tex"]').length,
                   translatedCodeText: document.querySelector('.cf-inline-translated-statement code')?.textContent,
                   typesetCalls: Number(document.documentElement.dataset.cfTypesetCalls || '0'),
                   leakedMarker: document.querySelector('.cf-inline-translated-statement')?.innerHTML.includes('CFIPROTECTED') || false,
+                  leakedBracketArtifact: ['[]','【】','[x rendered]','[2n rendered]'].some((artifact) => (document.querySelector('.cf-inline-translated-statement')?.innerText || '').includes(artifact)),
                   statementText: document.querySelector('.problem-statement')?.innerText,
                   translatedText: document.querySelector('.cf-inline-translated-statement')?.innerText,
+                  originalSampleCopyCount: document.querySelectorAll('.problem-statement:not(.cf-inline-translated-statement) .cf-inline-sample-copy').length,
+                  translatedSampleCopyCount: document.querySelectorAll('.cf-inline-translated-statement .cf-inline-sample-copy').length,
+                  translatedSampleCopyText: translatedCopy?.textContent,
                   buttonText: button.textContent
                 };
               })()`,
@@ -463,6 +510,74 @@ async function renderInEdge(url) {
             };
             await cdp.send('Emulation.setDeviceMetricsOverride', { width: 800, height: 600, deviceScaleFactor: 1, mobile: false });
             await new Promise((resolve) => setTimeout(resolve, 150));
+            const prepareWheelTarget = async (selector, atBottom = false) => {
+              const prepared = await cdp.send('Runtime.evaluate', {
+                contextId: world.executionContextId,
+                expression: `(() => {
+                  const target = document.querySelector(${JSON.stringify(selector)});
+                  target.scrollIntoView({ block: 'center' });
+                  if (${atBottom}) target.scrollTop = target.scrollHeight;
+                  const rect = target.getBoundingClientRect();
+                  return {
+                    x: rect.left + Math.min(rect.width / 2, 80),
+                    y: rect.top + Math.min(rect.height / 2, 40),
+                    pageTop: document.scrollingElement.scrollTop,
+                    targetTop: target.scrollTop,
+                    zoom: document.documentElement.style.zoom || '1'
+                  };
+                })()`,
+                returnByValue: true,
+              });
+              return prepared.result.value;
+            };
+            const readWheelState = async (selector) => {
+              const state = await cdp.send('Runtime.evaluate', {
+                contextId: world.executionContextId,
+                expression: `(() => {
+                  const target = document.querySelector(${JSON.stringify(selector)});
+                  return {
+                    pageTop: document.scrollingElement.scrollTop,
+                    targetTop: target.scrollTop,
+                    zoom: document.documentElement.style.zoom || '1'
+                  };
+                })()`,
+                returnByValue: true,
+              });
+              return state.result.value;
+            };
+            const dispatchWheel = async (point, modifiers = 0) => {
+              await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });
+              await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: point.x, y: point.y, deltaX: 0, deltaY: 120, modifiers });
+              await new Promise((resolve) => setTimeout(resolve, 120));
+            };
+            const horizontalBefore = await prepareWheelTarget('#wheel-horizontal');
+            await dispatchWheel(horizontalBefore);
+            const horizontalAfter = await readWheelState('#wheel-horizontal');
+            const verticalBefore = await prepareWheelTarget('#wheel-vertical');
+            await dispatchWheel(verticalBefore);
+            const verticalAfter = await readWheelState('#wheel-vertical');
+            const verticalBoundaryBefore = await prepareWheelTarget('#wheel-vertical', true);
+            await dispatchWheel(verticalBoundaryBefore);
+            const verticalBoundaryAfter = await readWheelState('#wheel-vertical');
+            const ctrlBefore = await prepareWheelTarget('#wheel-horizontal');
+            await dispatchWheel(ctrlBefore, 2);
+            const ctrlAfter = await readWheelState('#wheel-horizontal');
+            pageState.wheelHandoff = {
+              horizontalAdvancedPage: horizontalAfter.pageTop > horizontalBefore.pageTop,
+              verticalAdvancedInner: verticalAfter.targetTop > verticalBefore.targetTop,
+              verticalMovedPageBeforeBoundary: verticalAfter.pageTop !== verticalBefore.pageTop,
+              verticalBoundaryAdvancedPage: verticalBoundaryAfter.pageTop > verticalBoundaryBefore.pageTop,
+              ctrlWheelMovedPage: ctrlAfter.pageTop !== ctrlBefore.pageTop,
+              ctrlWheelChangedZoom: ctrlAfter.zoom !== ctrlBefore.zoom,
+              horizontalBefore,
+              horizontalAfter,
+              verticalBefore,
+              verticalAfter,
+              verticalBoundaryBefore,
+              verticalBoundaryAfter,
+              ctrlBefore,
+              ctrlAfter,
+            };
           }
         }
         pageState.inspectedFrames = inspectedFrames;

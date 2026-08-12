@@ -8,6 +8,7 @@ const {
   isUsefulChineseTranslation,
   parseGoogleTranslationResponse,
   parseBingTranslationResponse,
+  resetTranslationStateForTests,
   translateHtmlItems,
 } = require('../out/localization.js');
 
@@ -17,6 +18,10 @@ test('rejects unchanged long English text while allowing Chinese and short techn
   assert.equal(isUsefulChineseTranslation(source, '这是该问题的困难版本，两个版本之间唯一的区别是允许范围。'), true);
   assert.equal(isUsefulChineseTranslation('Hello problem statement.', 'Hello problem statement.'), false);
   assert.equal(isUsefulChineseTranslation('GNU G++20', 'GNU G++20'), true);
+  assert.equal(isUsefulChineseTranslation(
+    source,
+    '这是困难版本。 The only difference between the two versions is the allowed range.'
+  ), false);
 });
 
 test('supports persistent Ctrl+wheel page zoom and Ctrl+0 reset', () => {
@@ -32,6 +37,11 @@ test('supports persistent Ctrl+wheel page zoom and Ctrl+0 reset', () => {
   assert.match(script, /cfInlineEffectiveNarrow/);
   assert.match(script, /window\.innerWidth\*inverse/);
   assert.match(script, /window\.addEventListener\('resize'/);
+  assert.match(script, /installWheelScrollHandoff/);
+  assert.match(script, /document\.scrollingElement/);
+  assert.match(script, /canScrollVertically/);
+  assert.match(script, /event\.defaultPrevented\|\|event\.ctrlKey/);
+  assert.match(script, /textarea,select,option,input\[type=/);
   assert.match(script, /页面缩放/);
   assert.match(script, /__cfInlinePageZoomControl/);
   assert.doesNotThrow(() => new Function(script));
@@ -46,7 +56,8 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /"Accepted":"通过"/);
   assert.match(script, /var autoTranslateStatements=false/);
   assert.doesNotMatch(script, /data-cfi-protected|CFIPROTECTED/);
-  assert.match(script, /pre,code,script,style/);
+  assert.match(script, /pre,code,.MathJax/);
+  assert.doesNotMatch(script, /protectedSelector='[^']*tex-font-style/);
   assert.doesNotMatch(script, /statement\.innerHTML=/);
   assert.match(script, /cf-inline-translated-wrap/);
   assert.match(script, /英文原题保持不变/);
@@ -59,12 +70,13 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /event\.preventDefault\(\);event\.stopPropagation\(\)/);
   assert.match(script, /placement\.parentNode\.insertBefore\(toolbar,placement\)/);
   assert.match(script, /\.ttypography,p,blockquote,ul,ol/);
-  assert.doesNotMatch(script, /p,li,blockquote/);
   assert.match(script, /closest\('\.problem-statement/);
   assert.match(script, /installSubmitFormRepair/);
   assert.match(script, /installInlineSubmitter/);
   assert.match(script, /installSampleCopyButtons/);
   assert.match(script, /cf-inline-sample-copy/);
+  assert.match(script, /cfInlineSampleCopyHandler/);
+  assert.match(script, /target\.closest\('\.cf-inline-sample-copy'\)/);
   assert.match(script, /复制这个样例/);
   assert.match(script, /navigator\.clipboard\.writeText/);
   assert.match(script, /document\.execCommand\('copy'\)/);
@@ -78,13 +90,30 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /translateTextNodesSafely/);
   assert.doesNotMatch(script, /prepared\.html\.length<=4200/);
   assert.match(script, /return translateTextNodesSafely\(block\)/);
-  assert.ok(script.includes("raw.match(/^\\s*/)") && script.includes("raw.match(/\\s*$/)"));
-  assert.ok(script.includes("core.match(/[\\s\\S]{1,2200}/g)"));
-  assert.doesNotMatch(script, /core\.match\(\/\[sS\]/);
-  assert.match(script, /'⟦CFI'\+piece\.id\+'⟧'/);
-  assert.match(script, /if\(fallback\.length\)/);
-  assert.match(script, /在线翻译仍返回英文原文/);
-  assert.match(script, /if\(dictionary\[core\.trim\(\)\]\)continue/);
+  assert.match(script, /scopeSelector='p,li,blockquote/);
+  assert.match(script, /function tokenValue/);
+  assert.match(script, /\[\[93/);
+  assert.match(script, /function tokenMatch/);
+  assert.match(script, /［【\]\+/);
+  assert.match(script, /］】\]\+/);
+  assert.match(script, /validTokens/);
+  assert.match(script, /if\(retry\.length\)/);
+  assert.match(script, /fragmentFallback/);
+  assert.match(script, /fragmentTranslations/);
+  assert.match(script, /function localVersionNotice/);
+  assert.match(script, /function versionNoticeContainer/);
+  assert.match(script, /querySelectorAll\('p,div,blockquote,strong,b'\)/);
+  assert.match(script, /specialVersionScope/);
+  assert.match(script, /replace\(\/\[\\t\\r\\n \]\+\/g/);
+  assert.match(script, /starts&&\/\(\?:hack\|both versions\|all versions\)/);
+  assert.doesNotMatch(script, /replace\(\/s\+\/g/);
+  assert.match(script, /this\[ \]\+is\[ \]\+/);
+  assert.match(script, /set of allowed values for/);
+  assert.match(script, /integerRange/);
+  assert.match(script, /preserveBold/);
+  assert.match(script, /strong,b,.tex-font-style-bf/);
+  assert.match(script, /这是该题的/);
+  assert.match(script, /只有解决本题的所有版本后/);
   assert.match(script, /Promise\.all\(\[worker\(\),worker\(\),worker\(\),worker\(\),worker\(\),worker\(\)\]\)/);
   assert.match(script, /提交到 Codeforces/);
   assert.match(script, /cleanSubmitMessage/);
@@ -139,7 +168,8 @@ test('parses all translated segments returned by the translation service', () =>
   assert.throws(() => parseBingTranslationResponse('{}'), /无法识别/);
 });
 
-test('uses the directly reachable Bing translation path before Google', async () => {
+test('races Bing and Google on the first request and remembers the winner', async () => {
+  resetTranslationStateForTests();
   const requests = [];
   const translated = await translateHtmlItems(['<p>Fallback provider test</p>'], async (request) => {
     requests.push(request);
@@ -156,23 +186,23 @@ test('uses the directly reachable Bing translation path before Google', async ()
         body: Buffer.from(JSON.stringify([{ translations: [{ text: '<p>备用翻译成功</p>' }] }]))
       };
     }
+    if (url.hostname === 'translate.googleapis.com') {
+      throw new Error('Google unavailable in this test');
+    }
     throw new Error(`unexpected host ${url.hostname}`);
   });
 
   assert.deepEqual(translated, ['<p>备用翻译成功</p>']);
-  assert.deepEqual(
-    requests.map((request) => new URL(request.url).hostname),
-    [
-      'cn.bing.com',
-      'cn.bing.com',
-    ]
-  );
-  assert.equal(requests[0].timeoutMs, 15000);
-  assert.equal(requests[1].timeoutMs, 20000);
-  assert.match(requests[1].body.toString('utf8'), /token=bing-token-value/);
+  assert.ok(requests.some((request) => new URL(request.url).hostname === 'translate.googleapis.com'));
+  const bingSessionRequest = requests.find((request) => new URL(request.url).pathname === '/translator');
+  const bingTranslationRequest = requests.find((request) => new URL(request.url).pathname === '/ttranslatev3');
+  assert.equal(bingSessionRequest.timeoutMs, 15000);
+  assert.equal(bingTranslationRequest.timeoutMs, 20000);
+  assert.match(bingTranslationRequest.body.toString('utf8'), /token=bing-token-value/);
 });
 
 test('re-establishes the Bing session once after a transient network timeout', async () => {
+  resetTranslationStateForTests();
   const paths = [];
   let failedOnce = false;
   const translated = await translateHtmlItems(['<p>Transient Bing retry test</p>'], async (request) => {
@@ -202,6 +232,7 @@ test('re-establishes the Bing session once after a transient network timeout', a
 });
 
 test('falls back to Google only when Bing is unavailable', async () => {
+  resetTranslationStateForTests();
   const hosts = [];
   const translated = await translateHtmlItems(['<p>Google fallback test</p>'], async (request) => {
     const url = new URL(request.url);
@@ -218,5 +249,5 @@ test('falls back to Google only when Bing is unavailable', async () => {
     throw new Error(`unexpected host ${url.hostname}`);
   });
   assert.deepEqual(translated, ['<p>Google 备用成功</p>']);
-  assert.equal(hosts.at(-1), 'translate.googleapis.com');
+  assert.ok(hosts.includes('translate.googleapis.com'));
 });
