@@ -126,6 +126,7 @@ export class CfProxy extends EventEmitter {
   private loginInProgress = false;
   private loginMessage = '';
   private transport: CfUpstreamTransport | undefined;
+  private sessionHealthTimer: NodeJS.Timeout | undefined;
   private readonly staticCache = new Map<string, StaticCacheEntry>();
   private readonly inFlightStaticRequests = new Map<string, Promise<CfTransportResponse>>();
   private readonly pageSnapshots = new Map<string, PageSnapshotEntry>();
@@ -193,6 +194,22 @@ export class CfProxy extends EventEmitter {
     this.emit('sessionChange');
   }
 
+  refreshSessionHealth(): void {
+    const transport = this.transport;
+    if (!transport || transport.isAlive?.() !== false) {
+      return;
+    }
+    this.transport = undefined;
+    this.sessionReady = false;
+    this.jar = new CookieJar();
+    this.loginInProgress = false;
+    this.loginMessage = 'Edge 浏览器已关闭，Codeforces 浏览、翻译和提交暂不可用。请重新连接 Edge。';
+    this.clearPageSnapshots();
+    this.emit('cookieChange');
+    this.emit('sessionChange');
+    void transport.dispose();
+  }
+
   attachBrowserSession(
     cookies: BrowserCookie[],
     userAgent: string,
@@ -237,6 +254,8 @@ export class CfProxy extends EventEmitter {
     this.upstreamUserAgent = userAgent;
     this.transport = transport;
     this.sessionReady = true;
+    this.loginInProgress = false;
+    this.loginMessage = '';
     this.clearPageSnapshots();
     this.emit('cookieChange');
     this.emit('sessionChange');
@@ -268,6 +287,8 @@ export class CfProxy extends EventEmitter {
       }
       await this.listen(0);
     }
+    this.sessionHealthTimer = setInterval(() => this.refreshSessionHealth(), 1_000);
+    this.sessionHealthTimer.unref?.();
   }
 
   private listen(port: number): Promise<void> {
@@ -289,6 +310,10 @@ export class CfProxy extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    if (this.sessionHealthTimer) {
+      clearInterval(this.sessionHealthTimer);
+      this.sessionHealthTimer = undefined;
+    }
     await this.detachTransport();
     this.staticCache.clear();
     this.inFlightStaticRequests.clear();

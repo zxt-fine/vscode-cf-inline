@@ -107,6 +107,22 @@ test('publishes login and live transport atomically, then clears both on detach'
   assert.deepEqual(transport.disposed, true);
 });
 
+test('detects a closed Edge transport without waiting for another page request', async () => {
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/', port: 0 });
+  const transport = new FakeTransport(() => response('<html><body>ok</body></html>'));
+  let changes = 0;
+  proxy.on('sessionChange', () => { changes += 1; });
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  transport.alive = false;
+  proxy.refreshSessionHealth();
+  const state = proxy.state();
+  assert.equal(state.loggedIn, false);
+  assert.equal(state.sessionReady, false);
+  assert.match(state.loginMessage, /Edge.*已关闭/);
+  assert.equal(transport.disposed, true);
+  assert.ok(changes >= 2);
+});
+
 test('forwards GET and POST through the attached Edge transport and rewrites HTML', async (t) => {
   const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/groups', port: 0 });
   const transport = new FakeTransport((request) => request.method === 'POST'
