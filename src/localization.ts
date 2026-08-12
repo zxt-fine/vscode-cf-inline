@@ -627,6 +627,11 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         });
       }
     }
+    var statementTranslationCache=new Map();
+    function rememberStatementTranslation(source,translated){
+      if(statementTranslationCache.size>=500)statementTranslationCache.delete(statementTranslationCache.keys().next().value);
+      statementTranslationCache.set(source,translated);
+    }
     async function requestTranslationItems(items){
       var output=[];
       for(var offset=0;offset<items.length;offset+=32){
@@ -711,7 +716,14 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         Array.from(target.childNodes).forEach(visit);
         protectedNodes.push(document.createTextNode(''));
         parts.push(' '+tokenValue(serial,protectedNodes.length-1,alternate));
-        return {scope:scope,target:target,source:parts.join('').replace(/[ \\t]+/g,' ').trim(),nodes:protectedNodes,serial:serial,alternate:alternate};
+        var source=parts.join('').replace(/[ \\t]+/g,' ').trim(),sourceSegments=[],sourceCursor=0,sourceValid=true;
+        protectedNodes.forEach(function(node,index){
+          var marker=tokenValue(serial,index,alternate),markerIndex=source.indexOf(marker,sourceCursor);
+          if(markerIndex<0){sourceValid=false;sourceSegments.push('');return;}
+          sourceSegments.push(source.slice(sourceCursor,markerIndex));sourceCursor=markerIndex+marker.length;
+        });
+        sourceSegments.push(source.slice(sourceCursor));
+        return {scope:scope,target:target,source:source,sourceSegments:sourceSegments,sourceValid:sourceValid,nodes:protectedNodes,serial:serial,alternate:alternate};
       }
       function tokenValue(serial,index,alternate){return '[[93'+serial+'7'+index+(alternate?'49':'39')+']]';}
       function token(unit,index){return tokenValue(unit.serial,index,unit.alternate);}
@@ -727,11 +739,13 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       }
       function apply(unit,translated){
         var fragment=document.createDocumentFragment(),remaining=String(translated),cursor=0;
-        unit.nodes.forEach(function(node,index){
+        for(var index=0;index<unit.nodes.length;index++){
+          var node=unit.nodes[index];
           var match=tokenMatch(unit,index,remaining,cursor);
+          if(!match)throw new Error('译文中的公式或代码占位符不完整');
           fragment.appendChild(document.createTextNode(remaining.slice(cursor,match.index)));
           fragment.appendChild(node);cursor=match.index+match.length;
-        });
+        }
         fragment.appendChild(document.createTextNode(remaining.slice(cursor)));
         unit.target.replaceChildren(fragment);
       }
@@ -762,7 +776,8 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         if(/both versions?[^.]*solved|solved[^.]*both versions?/i.test(source))result+='只有两个版本都已解决后，才可以进行 Hack。';
         else if(/all versions?[^.]*solved|solved[^.]*all versions?/i.test(source))result+='只有解决本题的所有版本后，才可以进行 Hack。';
         else if(/hack/i.test(source))result+='满足题目所述的版本完成条件后，才可以进行 Hack。';
-        return result+token(unit,unit.nodes.length-1);
+        var candidate=result+token(unit,unit.nodes.length-1);
+        return validTokens(unit,candidate)?candidate:'';
       }
       var units=scopes.map(function(scope,index){return prepare(scope,index,false);}).filter(function(unit){
         var prose=unit.source.replace(/\\[\\[\\s*93\\s*\\d+\\s*7\\s*\\d+\\s*(?:39|49)\\s*\\]\\]/g,'').trim();
@@ -776,27 +791,62 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         return false;
       });
       if(!units.length)return clone;
-      var translations=await requestTranslationItems(units.map(function(unit){return unit.source;})),retry=[];
-      units.forEach(function(unit,index){if(!useful(unit.source,translations[index])||!validTokens(unit,translations[index]))retry.push({unit:unit,index:index});});
+      var translations=new Array(units.length),missingUnits=[];
+      units.forEach(function(unit,index){
+        if(statementTranslationCache.has(unit.source))translations[index]=statementTranslationCache.get(unit.source);
+        else missingUnits.push({unit:unit,index:index});
+      });
+      if(missingUnits.length){
+        var missingTranslations=await requestTranslationItems(missingUnits.map(function(entry){return entry.unit.source;}));
+        missingUnits.forEach(function(entry,index){translations[entry.index]=missingTranslations[index];});
+      }
+      var retry=[];
+      units.forEach(function(unit,index){
+        if(!useful(unit.source,translations[index])||!validTokens(unit,translations[index]))retry.push({unit:unit,index:index});
+        else rememberStatementTranslation(unit.source,translations[index]);
+      });
       if(retry.length){
         var retryUnits=retry.map(function(entry){return prepare(entry.unit.scope,entry.index,true);});
-        var retryTranslations=await requestTranslationItems(retryUnits.map(function(unit){return unit.source;}));
+        var retryTranslations=new Array(retryUnits.length),missingRetry=[];
+        retryUnits.forEach(function(unit,index){
+          if(statementTranslationCache.has(unit.source))retryTranslations[index]=statementTranslationCache.get(unit.source);
+          else missingRetry.push({unit:unit,index:index});
+        });
+        if(missingRetry.length){
+          var missingRetryTranslations=await requestTranslationItems(missingRetry.map(function(entry){return entry.unit.source;}));
+          missingRetry.forEach(function(entry,index){retryTranslations[entry.index]=missingRetryTranslations[index];});
+        }
         var fragmentFallback=[];
         retry.forEach(function(entry,index){
           var retryUnit=retryUnits[index],translated=retryTranslations[index];
           if(!useful(retryUnit.source,translated)||!validTokens(retryUnit,translated))fragmentFallback.push({entry:entry,unit:retryUnit});
-          else{entry.unit=retryUnit;translations[entry.index]=translated;}
+          else{entry.unit=retryUnit;translations[entry.index]=translated;rememberStatementTranslation(retryUnit.source,translated);}
         });
         if(fragmentFallback.length){
           var fragments=[];
           fragmentFallback.forEach(function(fallback){
-            var source=fallback.unit.source,cursor=0,segments=[];
-            fallback.unit.nodes.forEach(function(node,index){var match=tokenMatch(fallback.unit,index,source,cursor);segments.push(source.slice(cursor,match.index));cursor=match.index+match.length;});
-            segments.push(source.slice(cursor));fallback.segments=segments;
+            if(!fallback.unit.sourceValid||fallback.unit.sourceSegments.length!==fallback.unit.nodes.length+1)throw new Error('题面公式分段结构无效');
+            var segments=fallback.unit.sourceSegments.slice();fallback.segments=segments;
             segments.forEach(function(segment,index){if(/[A-Za-z]{2}/.test(segment))fragments.push({fallback:fallback,index:index,text:segment});});
           });
-          var fragmentTranslations=fragments.length?await requestTranslationItems(fragments.map(function(fragment){return fragment.text;})):[];
-          fragments.forEach(function(fragment,index){fragment.fallback.segments[fragment.index]=useful(fragment.text,fragmentTranslations[index])?fragmentTranslations[index]:fragment.text;});
+          var fragmentTranslations=new Array(fragments.length),missingFragments=[];
+          fragments.forEach(function(fragment,index){
+            if(statementTranslationCache.has(fragment.text))fragmentTranslations[index]=statementTranslationCache.get(fragment.text);
+            else missingFragments.push({fragment:fragment,index:index});
+          });
+          if(missingFragments.length){
+            var missingFragmentTranslations=await requestTranslationItems(missingFragments.map(function(entry){return entry.fragment.text;}));
+            missingFragments.forEach(function(entry,index){fragmentTranslations[entry.index]=missingFragmentTranslations[index];});
+          }
+          var incompleteFragments=[];
+          fragments.forEach(function(fragment,index){
+            if(useful(fragment.text,fragmentTranslations[index])){
+              fragment.fallback.segments[fragment.index]=fragmentTranslations[index];
+              rememberStatementTranslation(fragment.text,fragmentTranslations[index]);
+            }
+            else incompleteFragments.push(fragment.text);
+          });
+          if(incompleteFragments.length)throw new Error('在线翻译仍返回英文原文');
           fragmentFallback.forEach(function(fallback){
             var rebuilt='';fallback.unit.nodes.forEach(function(node,index){rebuilt+=fallback.segments[index]+token(fallback.unit,index);});rebuilt+=fallback.segments[fallback.segments.length-1];
             fallback.entry.unit=fallback.unit;translations[fallback.entry.index]=rebuilt;
@@ -1190,9 +1240,17 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           if(!prepared.length) throw new Error('当前题面不需要翻译');
           var translatedByIndex=new Map(),translationErrors=[];
           var nextPrepared=0;
-          async function worker(){while(nextPrepared<prepared.length){var entry=prepared[nextPrepared++];try{translatedByIndex.set(entry.index,await translateBlockReliably(entry.block,entry.index));}catch(error){translationErrors.push(String(error&&error.message||error));}}}
+          async function translatePrepared(entry){
+            var lastError;
+            for(var attempt=0;attempt<3;attempt++){
+              try{return await translateBlockReliably(entry.block,entry.index);}
+              catch(error){lastError=error;if(attempt<2)await new Promise(function(resolve){setTimeout(resolve,250*(attempt+1));});}
+            }
+            throw lastError;
+          }
+          async function worker(){while(nextPrepared<prepared.length){var entry=prepared[nextPrepared++];try{translatedByIndex.set(entry.index,await translatePrepared(entry));}catch(error){translationErrors.push(String(error&&error.message||error));}}}
           await Promise.all([worker(),worker(),worker(),worker(),worker(),worker()]);
-          if(!translatedByIndex.size)throw new Error(translationErrors[0]||'在线翻译暂时不可用');
+          if(translationErrors.length||translatedByIndex.size!==prepared.length)throw new Error('题面仍有段落未能完整翻译：'+(translationErrors[0]||'在线翻译暂时不可用'));
           translatedWrap=document.createElement('section'); translatedWrap.className='cf-inline-translated-wrap';
           var heading=document.createElement('div'); heading.className='cf-inline-translated-heading'; heading.textContent='中文翻译';
           var translatedStatement=document.createElement('div'); translatedStatement.className='problem-statement cf-inline-translated-statement';
@@ -1200,7 +1258,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           translatedWrap.appendChild(heading); translatedWrap.appendChild(translatedStatement);
           statement.parentNode.insertBefore(translatedWrap,statement.nextSibling);
           localize(translatedStatement);
-          button.textContent='隐藏中文译文'; status.textContent=translationErrors.length?'中文译文已生成；少数暂未译出的段落保留英文，可点击重试题面':'中文译文显示在英文原题下方；英文原题保持不变';
+          button.textContent='隐藏中文译文'; status.textContent='中文译文显示在英文原题下方；英文原题保持不变';
         }catch(error){status.textContent='翻译失败：'+String(error&&error.message||error);}
         finally{busy=false;button.disabled=false;}
       }

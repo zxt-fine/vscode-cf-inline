@@ -61,6 +61,9 @@ async function main() {
         originalVisible: translationToggle?.statementText.includes('Hello problem statement.'),
         firstParagraph: translationToggle?.translatedText.includes('你好，题目描述。'),
         formulaParagraph: translationToggle?.translatedText.includes('公式后的补充说明。'),
+        recoveredIncompleteParagraph: translationToggle?.translatedText.includes('请在双方都采用最优策略时确定游戏结果。'),
+        noIncompleteEnglishParagraph: !translationToggle?.translatedText.includes('Determine the outcome of the game with optimal play.'),
+        unknownHardNotice: translationToggle?.translatedText.includes('这是一个陌生的困难版本说明') && translationToggle?.translatedText.includes('special rendered'),
         hardParagraph: translationToggle?.translatedText.includes('这是该题的困难版本'),
         hardParagraphVariables: translationToggle?.translatedText.includes('初始数组以及操作 1 中 x rendered 的允许取值范围'),
         hardParagraphRange: translationToggle?.translatedText.includes('range rendered 范围内的任意整数'),
@@ -69,7 +72,7 @@ async function main() {
         easyParagraph: translationToggle?.translatedText.includes('这是该题的简单版本。与其他版本相比，此版本的约束更小。'),
         originalMathStable: translationToggle?.sameMathNode,
         translatedMathText: translationToggle?.translatedMathText === '2n rendered',
-        translatedMathCount: translationToggle?.translatedMathCount === 3,
+        translatedMathCount: translationToggle?.translatedMathCount === 4,
         previewsRemoved: translationToggle?.translatedMathPreviewCount === 0,
         sourcesRemoved: translationToggle?.translatedMathSourceCount === 0,
         codeStable: translationToggle?.translatedCodeText === 'int x;',
@@ -82,6 +85,10 @@ async function main() {
       };
       if (Object.values(translationChecks).some((passed) => !passed)) {
         throw new Error(`Repeated translation toggles damaged the statement: ${JSON.stringify({ translationChecks, translationToggle })}`);
+      }
+      const incompleteRequests = session.transport.translationPayloads.filter((item) => item.includes('Determine the outcome of the game with optimal play.'));
+      if (incompleteRequests.length < 4) {
+        throw new Error(`Incomplete prose did not trigger a whole-block retry: ${JSON.stringify(incompleteRequests)}`);
       }
       const wheelHandoff = rendered.pageState?.wheelHandoff;
       if (!wheelHandoff?.horizontalAdvancedPage
@@ -97,8 +104,10 @@ async function main() {
         && item.includes('Additional explanation after the formula.'))) {
         throw new Error(`A formula split one natural paragraph into separate translation requests: ${JSON.stringify(session.transport.translationPayloads)}`);
       }
-      const hardRequests = session.transport.translationPayloads.filter((item) => item.includes('This is the hard version of the problem.'));
+      const hardRequests = session.transport.translationPayloads.filter((item) => item.includes('This is the hard version of the problem.') && item.includes('initial array'));
       if (hardRequests.length !== 0) throw new Error(`The fixed bold version notice should be translated locally: ${JSON.stringify(hardRequests)}`);
+      const unknownHardRequests = session.transport.translationPayloads.filter((item) => item.includes('This is the hard version of the problem. A special rule uses'));
+      if (!unknownHardRequests.length) throw new Error('An unknown hard-version template with formulas should safely fall back to online translation');
       const easyRequests = session.transport.translationPayloads.filter((item) => item.includes('This is the Easy version of the problem.'));
       if (easyRequests.length !== 0) throw new Error(`The fixed easy-version notice should be translated locally: ${JSON.stringify(easyRequests)}`);
       const formulaRequests = session.transport.translationPayloads.filter((item) => item.includes('Hello problem statement.'));
@@ -188,7 +197,7 @@ function syntheticSession() {
     <div style="font: 24px sans-serif; color: #123">Groups content is visible</div>
     <div id="globalEnglish" class="ttypography"><p>This is an English announcement outside the problem statement.</p><ol><li>First solver: tourist</li><li>Second solver: Benq</li></ol></div>
     <a id="linkedTopic" href="/blog/entry/1"><div id="linkedEnglish" class="ttypography"><h1>ICPC Challenge powered by Huawei</h1><p>By ICPCNews, 9 days ago.</p></div></a>
-    <section class="problem-statement"><div class="header"><div>time limit per test</div></div><div><p class="version-note"><span class="tex-font-style-bf">This is the hard version of the problem. The only difference between the two versions is the set of allowed values for the initial array and for </span><span class="MathJax_Preview"></span><span class="MathJax"><span>x rendered</span></span><script type="math/tex">x</script><span class="tex-font-style-bf"> in operations of type 1. In this version, these values can be any integers in </span><span class="MathJax_Preview"></span><span class="MathJax"><span>range rendered</span></span><script type="math/tex">[-10^9,10^9]</script><span class="tex-font-style-bf">. You can make hacks only if both versions of the problem are solved.</span></p><p><strong>This is the Easy version of the problem. The constraints in this version are smaller.</strong></p><p>Hello problem statement. <span class="MathJax_Preview"></span><span class="MathJax"><span>2n rendered</span></span><script type="math/tex">2n</script> Additional explanation after the formula.</p><code>int x;</code></div><div class="sample-tests"><div class="section-title">Examples</div><div class="input"><div class="title">Input</div><pre><div class="test-example-line">1 2</div></pre></div><div class="output"><div class="title">Output</div><pre><div class="test-example-line">3</div></pre></div></div></section>
+    <section class="problem-statement"><div class="header"><div>time limit per test</div></div><div><p class="version-note"><span class="tex-font-style-bf">This is the hard version of the problem. The only difference between the two versions is the set of allowed values for the initial array and for </span><span class="MathJax_Preview"></span><span class="MathJax"><span>x rendered</span></span><script type="math/tex">x</script><span class="tex-font-style-bf"> in operations of type 1. In this version, these values can be any integers in </span><span class="MathJax_Preview"></span><span class="MathJax"><span>range rendered</span></span><script type="math/tex">[-10^9,10^9]</script><span class="tex-font-style-bf">. You can make hacks only if both versions of the problem are solved.</span></p><p><strong>This is the Easy version of the problem. The constraints in this version are smaller.</strong></p><p class="unknown-version-note"><strong>This is the hard version of the problem. A special rule uses </strong><span class="MathJax"><span>special rendered</span></span><script type="math/tex">special</script><strong>. You can hack only after solving every required version.</strong></p><p>Hello problem statement. <span class="MathJax_Preview"></span><span class="MathJax"><span>2n rendered</span></span><script type="math/tex">2n</script> Additional explanation after the formula.</p><p>Determine the outcome of the game with optimal play. More formally, one player is considered to win if a strategy always succeeds regardless of the opponent's choices.</p><code>int x;</code></div><div class="sample-tests"><div class="section-title">Examples</div><div class="input"><div class="title">Input</div><pre><div class="test-example-line">1 2</div></pre></div><div class="output"><div class="title">Output</div><pre><div class="test-example-line">3</div></pre></div></div></section>
     <div style="height:600px"></div><div id="wheel-horizontal" style="box-sizing:border-box;width:240px;height:70px;overflow-x:auto;overflow-y:hidden"><div style="width:900px;height:60px">Horizontal-only scroll fixture</div></div><div style="height:120px"></div><div id="wheel-vertical" style="box-sizing:border-box;width:240px;height:100px;overflow-y:auto"><div style="height:600px">Vertical scroll fixture</div></div><div style="height:800px"></div></main></div>
     <script>if (window.parent.frames.length > 0) { window.stop(); }</script>
     <footer>Rendered footer</footer></div>
@@ -204,6 +213,7 @@ function syntheticSession() {
   const translationPayloads = [];
   let hardVersionReturnedUnchanged = false;
   let spacedMathMarkerReturned = false;
+  let incompleteProseReturns = 0;
   const transport = {
       submissions,
       translationPayloads,
@@ -216,11 +226,18 @@ function syntheticSession() {
             hardVersionReturnedUnchanged = true;
             return html;
           }
+          if (html.includes('Determine the outcome of the game with optimal play.') && incompleteProseReturns < 3) {
+            incompleteProseReturns += 1;
+            return html;
+          }
           let translated = html
             .replace('This is the hard version of the problem. The only difference between the two versions is the set of allowed values for ', '这是该题的困难版本，两个版本的唯一区别是操作 1 中 ')
             .replace(' in operations of type 1. You can make hacks only if both versions of the problem are solved.', ' 的允许取值范围。只有解决两个版本后才能进行攻击。')
             .replace('Hello problem statement.', '你好，题目描述。')
             .replace('Additional explanation after the formula.', '公式后的补充说明。')
+            .replace('This is the hard version of the problem. A special rule uses ', '这是一个陌生的困难版本说明，其中的特殊规则使用 ')
+            .replace('. You can hack only after solving every required version.', '。只有完成所有要求的版本后才能进行 Hack。')
+            .replace("Determine the outcome of the game with optimal play. More formally, one player is considered to win if a strategy always succeeds regardless of the opponent's choices.", '请在双方都采用最优策略时确定游戏结果。更正式地说，如果一名玩家存在无论对手如何选择都能获胜的策略，则认为该玩家获胜。')
             .replace('This is an English announcement outside the problem statement.', '这是一段英文公告，位于题目描述之外。')
             .replace('First solver: tourist', '第一位解题者：tourist')
             .replace('Second solver: Benq', '第二位解题者：Benq')
