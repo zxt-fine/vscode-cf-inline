@@ -96,6 +96,9 @@ npm run package
 | `Codeforces Inline: 在 VS Code 集成浏览器中打开` | 直接使用 VS Code 集成浏览器显示页面 |
 | `Codeforces Inline: 打开旧版内嵌面板` | 使用旧版 iframe 内嵌界面 |
 | `Codeforces Inline: 登录并连接 Edge 会话` | 打开登录连接页面 |
+| `Codeforces Inline: 配置 AI 增强翻译` | 选择 DeepSeek、OpenAI、Ollama 或自定义兼容接口 |
+| `Codeforces Inline: 安全保存 AI API Key` | 将 API Key 存入 VS Code 加密密钥存储 |
+| `Codeforces Inline: 测试 AI 增强翻译连接` | 测试当前接口、模型和密钥是否可用 |
 
 ## 配置
 
@@ -108,6 +111,32 @@ npm run package
 | `cfInline.defaultLanguage` | `auto` | 提交语言偏好；`auto` 根据文件扩展名选择 |
 | `cfInline.localizeInterface` | `true` | 汉化常用 Codeforces 界面 |
 | `cfInline.autoTranslateStatements` | `true` | 自动在英文题面下方生成中文译文 |
+| `cfInline.aiTranslationEnabled` | `false` | 可选地使用 AI 结合上下文审校普通译文 |
+| `cfInline.aiProvider` | `ollama` | 使用本机 Ollama 或 OpenAI 兼容接口 |
+| `cfInline.aiEndpoint` | `http://127.0.0.1:11434` | AI 服务根地址或完整 Chat API 地址 |
+| `cfInline.aiModel` | `qwen3:8b` | 使用的模型名称，可自由填写厂商支持的模型 |
+| `cfInline.aiTimeoutMs` | `60000` | 每批 AI 审校请求的超时时间 |
+| `cfInline.aiFallbackToStandard` | `true` | AI 不可用时自动回退普通译文 |
+
+### AI 增强翻译（可选）
+
+普通翻译仍然免费且默认启用。需要更强语境判断时，可从 Codeforces 侧边栏点击“配置 AI 增强翻译”，或者运行同名命令：
+
+- 普通翻译默认优先使用 DeepL；DeepL 超时、限流或不可用时会自动切换到 Bing/Google，不需要配置，也不会因为单个服务失败而中断整份题面。
+- `本地 Ollama`：完全在本机运行，不需要 API Key。推荐中文模型 `qwen3:8b` 或 `qwen2.5:7b`。
+- `DeepSeek`：无需填写接口地址；插件固定使用官方 API，并提供 `deepseek-chat`、`deepseek-reasoner` 两个模型供选择。选择模型后填写 API Key，只有联网验证成功才会保存并启用。
+- `OpenAI`：预设官方 API 地址 `https://api.openai.com/v1` 和模型 `gpt-4.1-mini`。
+- `自定义 OpenAI 兼容 API`：用于其他实现 Chat Completions 接口的服务；接口地址和模型名可自行填写。
+- 验证成功的配置会进入“已保存的 AI 配置”列表；以后可直接选择并启用，无需再次填写模型或 API Key。不同服务商、模型和自定义地址可以分别保存并随时切换。
+- 从旧版本升级时，当前 AI 设置及其 API Key 会自动迁移成第一条已保存配置。
+- 插件侧边栏持续显示当前“翻译模式”：普通模式会显示“普通免费翻译（DeepL 优先）”，AI 模式会显示服务商和模型；点击这一项即可在免费翻译、已保存 AI 配置和新配置之间切换。选择框只将真正的当前模式标成蓝色。
+- 每条已保存 AI 配置右侧提供删除按钮；删除会同时清除配置及其安全 API Key。若删除当前 AI 配置，插件自动切回普通免费翻译。内置免费翻译不可删除。
+- Codeforces 极速/正常模式顶部的“翻译模式”按钮会打开同一个选择框，无需返回插件侧边栏。
+- API Key 只保存在 VS Code SecretStorage 中，不会进入 `settings.json`、日志、VSIX 或 Git 仓库。
+- AI 会在普通译文基础上结合相邻段落审核语境，并严格检查公式和代码占位符；接口失败时默认自动回退普通译文。
+- AI 只损坏某一段的公式或代码占位符时，仅该段回退到已验证的普通译文，其余段落仍保留 AI 审校结果。
+- 成功结果会按模型和段落缓存，同一题面不会反复消耗 AI 请求。
+- 若曾手动配置 DeepSeek，请确认 API Key 来自 DeepSeek 开放平台，模型名是 API 实际支持的模型 ID；网页账号与 API Key 不是同一种凭据。
 
 ## 工作原理
 
@@ -130,7 +159,7 @@ Codeforces
 - 项目不会把 Codeforces 账号或密码保存到仓库、普通配置文件或日志中。
 - 登录状态保存在 VS Code 扩展数据目录下的专用 Edge 配置中，并由 Windows/Edge 管理。
 - 插件只导入建立会话所需的 Codeforces Cookie，不读取日常 Edge 配置或其他网站数据。
-- 题面翻译会把需要翻译的文本片段发送到 Bing 或 Google；公式、代码、图片和样例不会发送。
+- 题面普通翻译会把需要翻译的文本片段发送到 Bing 或 Google；公式、代码、图片和样例不会发送。仅当用户主动开启 AI 增强翻译时，英文片段和中文初稿才会发送到用户配置的 AI 服务。
 - 本地接口限制为回环地址，并对翻译、重新登录和页面状态接口进行来源或请求头校验。
 - 不要提交包含真实 Cookie、CSRF Token、账号密码、个人 Edge 配置或本机日志的 Issue。
 

@@ -31,6 +31,7 @@ export class CfSidebarProvider implements vscode.TreeDataProvider<CfSidebarItem>
 
   private lastHealth = '';
   private readonly healthTimer: NodeJS.Timeout;
+  private readonly configurationListener: vscode.Disposable;
 
   constructor(private readonly proxy: CfProxy) {
     proxy.on('sessionChange', this.handleSessionChange);
@@ -44,6 +45,14 @@ export class CfSidebarProvider implements vscode.TreeDataProvider<CfSidebarItem>
       }
     }, 1_000);
     this.healthTimer.unref?.();
+    this.configurationListener = vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('cfInline.aiTranslationEnabled')
+        || event.affectsConfiguration('cfInline.aiProvider')
+        || event.affectsConfiguration('cfInline.aiEndpoint')
+        || event.affectsConfiguration('cfInline.aiModel')) {
+        this.changeEmitter.fire();
+      }
+    });
   }
 
   getTreeItem(element: CfSidebarItem): vscode.TreeItem {
@@ -77,12 +86,37 @@ export class CfSidebarProvider implements vscode.TreeDataProvider<CfSidebarItem>
           this.action('打开插件登录页面', 'sign-in', '查看连接说明与登录进度', 'cfInline.open'),
         ];
 
+    const translationConfig = vscode.workspace.getConfiguration('cfInline');
+    const aiEnabled = translationConfig.get<boolean>('aiTranslationEnabled') ?? false;
+    const aiModel = translationConfig.get<string>('aiModel')?.trim() || '未选择模型';
+    const aiEndpoint = translationConfig.get<string>('aiEndpoint')?.trim() || '';
+    let aiService = '自定义 AI';
+    if ((translationConfig.get<string>('aiProvider') ?? 'ollama') === 'ollama') aiService = 'Ollama';
+    else {
+      try {
+        const hostname = new URL(aiEndpoint).hostname.toLowerCase();
+        if (hostname === 'api.deepseek.com' || hostname.endsWith('.deepseek.com')) aiService = 'DeepSeek';
+        else if (hostname === 'api.openai.com' || hostname.endsWith('.openai.com')) aiService = 'OpenAI';
+      } catch { /* retain the custom label for an incomplete custom endpoint */ }
+    }
+    const translationModeItem = this.action(
+      '翻译模式',
+      aiEnabled ? 'sparkle-filled' : 'globe',
+      aiEnabled ? `AI：${aiService} / ${aiModel}` : '普通免费翻译（DeepL 优先）',
+      'cfInline.selectTranslationMode'
+    );
+
     const secondaryActions = connected
-      ? [this.action('重新验证 Codeforces 账号', 'account', '仅在连接异常时使用', 'cfInline.openLogin')]
-      : [];
+      ? [
+          this.action('配置 AI 增强翻译', 'sparkle', '可选：Ollama 或 OpenAI 兼容模型', 'cfInline.configureAiTranslation'),
+          this.action('测试 AI 翻译连接', 'beaker', '验证当前接口和模型', 'cfInline.testAiTranslation'),
+          this.action('重新验证 Codeforces 账号', 'account', '仅在连接异常时使用', 'cfInline.openLogin'),
+        ]
+      : [this.action('配置 AI 增强翻译', 'sparkle', '无需登录即可预先配置', 'cfInline.configureAiTranslation')];
 
     return [
       this.group('连接状态', 'pulse', [statusItem]),
+      this.group('翻译设置', 'symbol-misc', [translationModeItem]),
       this.group(connected ? '常用操作' : '恢复连接', connected ? 'rocket' : 'debug-disconnect', primaryActions),
       ...(secondaryActions.length ? [this.group('其他操作', 'ellipsis', secondaryActions)] : []),
     ];
@@ -112,6 +146,7 @@ export class CfSidebarProvider implements vscode.TreeDataProvider<CfSidebarItem>
   dispose(): void {
     this.proxy.off('sessionChange', this.handleSessionChange);
     clearInterval(this.healthTimer);
+    this.configurationListener.dispose();
     this.changeEmitter.dispose();
   }
 }

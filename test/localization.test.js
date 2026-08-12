@@ -8,9 +8,28 @@ const {
   isUsefulChineseTranslation,
   parseGoogleTranslationResponse,
   parseBingTranslationResponse,
+  parseDeepLTranslationResponse,
+  refineCompetitiveProgrammingTranslation,
   resetTranslationStateForTests,
   translateHtmlItems,
 } = require('../out/localization.js');
+
+test('corrects ambiguous game terminology using the English source context', () => {
+  const gameSource = 'They play for n rounds. Ajisai moves on odd-numbered rounds and Mai moves on even-numbered rounds. On each round, the player who is to move may swap a_i and b_i, or pass.';
+  const inaccurate = '他们进行 n 轮游戏。Ajisai 在奇数回合移动，Mai 在偶数回合移动。每一回合，要移动的玩家可以交换 a_i 和 b_i，或者通过。';
+  assert.equal(
+    refineCompetitiveProgrammingTranslation(gameSource, inaccurate),
+    '他们进行 n 轮游戏。Ajisai 在奇数回合行动，Mai 在偶数回合行动。每一回合，当前回合需要行动的玩家可以交换 a_i 和 b_i，或者跳过本回合。'
+  );
+  assert.equal(
+    refineCompetitiveProgrammingTranslation('The solution passes all tests.', '该解法通过所有测试。'),
+    '该解法通过所有测试。'
+  );
+  assert.equal(
+    refineCompetitiveProgrammingTranslation('Alice moves to position x on odd rounds.', 'Alice 在奇数回合移动到位置 x。'),
+    'Alice 在奇数回合移动到位置 x。'
+  );
+});
 
 test('rejects unchanged long English text while allowing Chinese and short technical labels', () => {
   const source = 'This is the hard version of the problem. The only difference between the two versions is the allowed range.';
@@ -88,6 +107,9 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /X-CF-Inline':'submit/);
   assert.doesNotMatch(script, /caf4f|adcd1e/);
   assert.match(script, /translateTextNodesSafely/);
+  assert.match(script, /refineContestTranslation/);
+  assert.match(script, /跳过本回合/);
+  assert.match(script, /当前回合需要行动的玩家/);
   assert.doesNotMatch(script, /prepared\.html\.length<=4200/);
   assert.match(script, /return translateTextNodesSafely\(block\)/);
   assert.match(script, /scopeSelector='p,li,blockquote/);
@@ -182,6 +204,32 @@ test('parses all translated segments returned by the translation service', () =>
     '你好，世界！'
   );
   assert.throws(() => parseBingTranslationResponse('{}'), /无法识别/);
+  assert.equal(
+    parseDeepLTranslationResponse(JSON.stringify({ result: { texts: [{ text: '你好，世界！' }] } })),
+    '你好，世界！'
+  );
+  assert.throws(() => parseDeepLTranslationResponse('{}'), /无法识别/);
+});
+
+test('uses DeepL first for ordinary translation and preserves protected HTML', async () => {
+  resetTranslationStateForTests();
+  const requests = [];
+  const source = '<p><strong>Hard version.</strong> Value [[9301237039]].</p>';
+  const translated = await translateHtmlItems([source], async (request) => {
+    requests.push(request);
+    const url = new URL(request.url);
+    assert.equal(url.hostname, 'www2.deepl.com');
+    const payload = JSON.parse(request.body.toString('utf8'));
+    assert.equal(payload.method, 'LMT_handle_texts');
+    assert.equal(payload.params.lang.target_lang, 'ZH');
+    assert.equal(payload.params.texts[0].text, source);
+    return {
+      statusCode: 200,
+      body: Buffer.from(JSON.stringify({ result: { texts: [{ text: '<p><strong>困难版本。</strong>值为 [[9301237039]]。</p>' }] } }))
+    };
+  });
+  assert.deepEqual(translated, ['<p><strong>困难版本。</strong>值为 [[9301237039]]。</p>']);
+  assert.equal(requests.length, 1);
 });
 
 test('races Bing and Google on the first request and remembers the winner', async () => {

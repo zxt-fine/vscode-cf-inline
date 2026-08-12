@@ -51,7 +51,7 @@ export class CfPanel {
           this.post({ type: 'loginProgress', text });
         });
         this.post({ type: 'loginProgress', text: '验证完成，正在加载 Codeforces 页面…' });
-        this.post({ type: 'toast', text: 'Codeforces 账号与四个入口均已验证，Edge 会话已连接' });
+        this.post({ type: 'toast', text: 'Codeforces 已连接' });
         if (prefersIntegratedBrowser()) {
           try {
             this.post({ type: 'loginProgress', text: '正在打开 VS Code 集成浏览器…' });

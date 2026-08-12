@@ -6,6 +6,8 @@ const calls = [];
 let availableCommands = ['workbench.action.browser.open'];
 let viewer = 'integratedBrowser';
 let fastMode = true;
+const closedTabs = [];
+const activeTabGroup = { tabs: [], activeTab: undefined };
 const vscodeStub = {
   commands: {
     getCommands: async () => availableCommands,
@@ -20,6 +22,13 @@ const vscodeStub = {
       },
     }),
   },
+  window: {
+    tabGroups: {
+      all: [activeTabGroup],
+      activeTabGroup,
+      close: async (tabs) => { closedTabs.push(...tabs); return true; },
+    },
+  },
 };
 
 const originalLoad = Module._load;
@@ -30,6 +39,8 @@ Module._load = function (request, parent, isMain) {
 
 const {
   integratedBrowserUrl,
+  integratedBrowserReuseFilter,
+  isCodeforcesBrowserTabLabel,
   openInIntegratedBrowser,
   prefersIntegratedBrowser,
 } = require('../out/integrated-browser.js');
@@ -52,12 +63,77 @@ test('opens the lightweight fast-mode shell in the native VS Code browser', asyn
     integratedBrowserUrl(proxy, false),
     'http://127.0.0.1:45678/__cf_inline/full'
   );
+  assert.equal(
+    integratedBrowserReuseFilter(proxy),
+    'http://127.0.0.1:45678/__cf_inline/*'
+  );
 
   await openInIntegratedBrowser(proxy);
   assert.deepEqual(calls, [[
     'workbench.action.browser.open',
-    'http://127.0.0.1:45678/__cf_inline/fast',
+    {
+      url: 'http://127.0.0.1:45678/__cf_inline/fast',
+      reuseUrlFilter: 'http://127.0.0.1:45678/__cf_inline/*',
+    },
   ]]);
+});
+
+test('reuses the existing Codeforces browser editor on repeated opens', async () => {
+  calls.length = 0;
+  availableCommands = ['workbench.action.browser.open'];
+  const proxy = connectedProxy('/groups/my');
+
+  await openInIntegratedBrowser(proxy);
+  await openInIntegratedBrowser(proxy);
+
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.equal(call[0], 'workbench.action.browser.open');
+    assert.equal(call[1].reuseUrlFilter, `${proxy.origin}/__cf_inline/*`);
+  }
+});
+
+test('keeps the active Codeforces browser tab and closes existing duplicates', async () => {
+  calls.length = 0;
+  closedTabs.length = 0;
+  availableCommands = ['workbench.action.browser.open'];
+  const first = { label: 'Codeforces 极速模式', isActive: false, isDirty: false };
+  const active = { label: 'Codeforces 极速模式', isActive: true, isDirty: false };
+  const normal = { label: 'Codeforces 正常模式', isActive: false, isDirty: false };
+  const source = { label: 'main.cpp', isActive: false, isDirty: false };
+  activeTabGroup.tabs = [source, first, active, normal];
+  activeTabGroup.activeTab = active;
+  try {
+    await openInIntegratedBrowser(connectedProxy());
+    assert.deepEqual(closedTabs, [first, normal]);
+    assert.equal(isCodeforcesBrowserTabLabel(source.label), false);
+    assert.equal(isCodeforcesBrowserTabLabel(active.label), true);
+  } finally {
+    activeTabGroup.tabs = [];
+    activeTabGroup.activeTab = undefined;
+  }
+});
+
+test('coalesces rapid repeated clicks while the browser editor is opening', async () => {
+  calls.length = 0;
+  availableCommands = ['workbench.action.browser.open'];
+  const originalExecute = vscodeStub.commands.executeCommand;
+  let release;
+  vscodeStub.commands.executeCommand = (...args) => {
+    calls.push(args);
+    return new Promise((resolve) => { release = resolve; });
+  };
+  try {
+    const proxy = connectedProxy('/groups/my');
+    const first = openInIntegratedBrowser(proxy);
+    const second = openInIntegratedBrowser(proxy);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls.length, 1);
+    release();
+    await Promise.all([first, second]);
+  } finally {
+    vscodeStub.commands.executeCommand = originalExecute;
+  }
 });
 
 test('falls back to Simple Browser on VS Code versions without the native browser command', async () => {

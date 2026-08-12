@@ -248,6 +248,9 @@ test('serves a lightweight fast-mode shell with only the four primary entries', 
   assert.match(html, /name="cfInlineMain"/);
   assert.match(html, /正在加载 Codeforces/);
   assert.match(html, /正常模式/);
+  assert.match(html, /id="translationMode"/);
+  assert.match(html, /翻译模式/);
+  assert.match(html, /__cf_inline\/translation-mode/);
   assert.match(html, /__cf_inline\/full/);
   assert.match(html, /正在切换到正常模式/);
   assert.match(html, /requestAnimationFrame/);
@@ -275,6 +278,9 @@ test('serves the complete-site interface and lets users return to fast mode', as
   assert.equal(result.statusCode, 200);
   assert.match(html, /Codeforces 正常模式/);
   assert.match(html, /切换到极速模式/);
+  assert.match(html, /id="translationMode"/);
+  assert.match(html, /翻译模式/);
+  assert.match(html, /__cf_inline\/translation-mode/);
   assert.match(html, /正在切换到极速模式/);
   assert.match(html, /正在加载完整 Codeforces 页面/);
   assert.match(html, /class="loading-text"/);
@@ -486,6 +492,38 @@ test('protects the local translation endpoint from unrelated browser requests', 
     body: Buffer.from('{"items":["Hello"]}', 'utf8'),
   });
   assert.equal(foreignPost.statusCode, 403);
+});
+
+test('keeps AI credentials server-side while enhancing protected translation requests', async (t) => {
+  const secret = 'server-side-secret-never-returned';
+  const transport = new FakeTransport(() => response('<html></html>'));
+  transport.translateHtmlItems = async (items) => items.map(() => '玩家可以交换，或者通过。');
+  let received;
+  const proxy = new CfProxy({
+    baseUrl: 'https://codeforces.com',
+    defaultPath: '/problemset/problem/1/A',
+    port: 0,
+    enhanceTranslations: async (sources, drafts) => {
+      received = { sources, drafts, secretUsedInternally: secret };
+      return ['玩家可以交换，或者跳过本回合。'];
+    },
+  });
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+
+  const body = JSON.stringify({ items: ['On each turn, the player may swap, or pass.'] });
+  const translated = await localRequest(`${proxy.origin}/__cf_inline/translate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CF-Inline': 'translate' },
+    body: Buffer.from(body),
+  });
+  assert.equal(translated.statusCode, 200);
+  assert.deepEqual(JSON.parse(translated.body.toString('utf8')).items, ['玩家可以交换，或者跳过本回合。']);
+  assert.deepEqual(received.sources, ['On each turn, the player may swap, or pass.']);
+  assert.deepEqual(received.drafts, ['玩家可以交换，或者通过。']);
+  assert.doesNotMatch(body, new RegExp(secret));
+  assert.doesNotMatch(translated.body.toString('utf8'), new RegExp(secret));
 });
 
 test('writes sample text through the protected VS Code clipboard bridge', async (t) => {
@@ -711,6 +749,26 @@ test('accepts a protected local relogin request and publishes progress state', a
     headers: { 'X-CF-Inline': 'relogin' },
   });
   await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requested, 1);
+});
+
+test('accepts only a protected local translation-mode request', async (t) => {
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/', port: 0 });
+  await proxy.start();
+  t.after(() => proxy.stop());
+  let requested = 0;
+  proxy.on('translationModeRequest', () => { requested += 1; });
+
+  const rejected = await localRequest(`${proxy.origin}/__cf_inline/translation-mode`, { method: 'POST' });
+  assert.equal(rejected.statusCode, 403);
+  assert.equal(requested, 0);
+
+  const accepted = await localRequest(`${proxy.origin}/__cf_inline/translation-mode`, {
+    method: 'POST',
+    headers: { 'X-CF-Inline': 'translation-mode' },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(accepted.statusCode, 202);
   assert.equal(requested, 1);
 });
 

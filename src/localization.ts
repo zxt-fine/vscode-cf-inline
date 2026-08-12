@@ -179,6 +179,22 @@ export function parseBingTranslationResponse(raw: string): string {
   return translated;
 }
 
+export function parseDeepLTranslationResponse(raw: string): string {
+  const data = JSON.parse(raw) as {
+    result?: { texts?: Array<{ text?: unknown }> };
+    error?: { message?: unknown };
+  };
+  const translated = data.result?.texts?.[0]?.text;
+  if (typeof translated === 'string' && translated) {
+    return translated;
+  }
+  const message = data.error?.message;
+  if (typeof message === 'string' && message) {
+    throw new Error(`DeepL 翻译失败：${message}`);
+  }
+  throw new Error('DeepL 翻译服务返回了无法识别的数据');
+}
+
 interface BingTranslationSession {
   ig: string;
   iid: string;
@@ -189,8 +205,9 @@ interface BingTranslationSession {
 
 let bingSession: BingTranslationSession | undefined;
 let bingSessionPromise: Promise<BingTranslationSession> | undefined;
+let deepLUnavailableUntil = 0;
 let googleUnavailableUntil = 0;
-let preferredTranslationProvider: 'bing' | 'google' | undefined;
+let preferredTranslationProvider: 'deepl' | 'bing' | 'google' | undefined;
 let translationProviderProbePromise: Promise<'bing' | 'google'> | undefined;
 
 function errorMessage(error: unknown): string {
@@ -250,6 +267,42 @@ export function isUsefulChineseTranslation(source: string, translated: string): 
     return false;
   }
   return true;
+}
+
+/**
+ * Correct ambiguous machine-translation terms only when the English source
+ * proves the competitive-programming meaning. Keep this function standalone:
+ * its runtime source is also injected into the translated Codeforces page.
+ */
+export function refineCompetitiveProgrammingTranslation(
+  source: string,
+  translated: string
+): string {
+  const english = String(source ?? '').replace(/\s+/g, ' ');
+  let result = String(translated ?? '');
+
+  // In turn-based games, "pass" means taking no action for this turn. A
+  // global 通过 -> 跳过 replacement would corrupt phrases such as "passes
+  // all tests", so require both the English action and turn/round context.
+  if (/\b(?:turn|round|game)\b/i.test(english) && /\bor\s+pass(?:es|ed|ing)?\b/i.test(english)) {
+    result = result.replace(
+      /(或(?:者)?)\s*(?:选择\s*)?(?:直接\s*)?(?:通过(?:本回合)?|放弃(?:本回合)?|传球|pass)(?=\s*(?:[，。；、,.!?！？;]|$|\[\[))/gi,
+      '$1跳过本回合'
+    );
+  }
+
+  // "the player to move" and "moves on odd rounds" identify whose turn it
+  // is; they do not describe changing physical position.
+  const turnBasedMove = /\b(?:turn|round)\b/i.test(english)
+    && /\b(?:player\s+(?:who\s+)?(?:has\s+to|must|is\s+to)\s+move|player\s+to\s+move|moves?\s+on\s+(?:odd|even)(?:-numbered)?\s+(?:turns|rounds))\b/i.test(english);
+  if (turnBasedMove) {
+    result = result
+      .replace(/在\s*(奇数|偶数)(?:编号的)?\s*(回合|轮次)(?:中)?\s*移动/g, '在$1$2行动')
+      .replace(/(?:要|需要|必须|将要|待)\s*移动的玩家/g, '当前回合需要行动的玩家')
+      .replace(/轮到\s*移动的玩家/g, '轮到行动的玩家');
+  }
+
+  return result;
 }
 
 async function requestBingSession(
@@ -332,6 +385,60 @@ async function requestGoogleTranslation(
   return parseGoogleTranslationResponse(response.body.toString('utf8'));
 }
 
+async function requestDeepLTranslation(
+  html: string,
+  requester: TranslationRequester
+): Promise<string> {
+  if (html.length > 5_000) {
+    throw new Error('DeepL 单段翻译内容超过 5000 字符');
+  }
+  const id = (Math.floor(Math.random() * 99_999) + 100_000) * 1_000;
+  const iCount = html.split('i').length - 1;
+  const now = Date.now();
+  const timestamp = iCount > 0
+    ? now - (now % (iCount + 1)) + iCount + 1
+    : now;
+  const payload = {
+    jsonrpc: '2.0',
+    method: 'LMT_handle_texts',
+    id,
+    params: {
+      splitting: 'newlines',
+      lang: {
+        source_lang_user_selected: 'auto',
+        target_lang: 'ZH',
+      },
+      texts: [{ text: html, requestAlternatives: 1 }],
+      timestamp,
+    },
+  };
+  let serialized = JSON.stringify(payload);
+  serialized = (id + 5) % 29 === 0 || (id + 3) % 13 === 0
+    ? serialized.replace('"method":"', '"method" : "')
+    : serialized.replace('"method":"', '"method": "');
+  const response = await requester({
+    url: 'https://www2.deepl.com/jsonrpc',
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Origin: 'https://www.deepl.com',
+      Referer: 'https://www.deepl.com/',
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36 Edg/126.0',
+    },
+    body: Buffer.from(serialized, 'utf8'),
+    timeoutMs: 12_000,
+  });
+  if (response.statusCode === 429) {
+    throw new Error('DeepL 请求过于频繁（HTTP 429）');
+  }
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`DeepL 翻译返回 HTTP ${response.statusCode}`);
+  }
+  return parseDeepLTranslationResponse(response.body.toString('utf8'));
+}
+
 async function requestBingTranslation(
   html: string,
   requester: TranslationRequester
@@ -395,12 +502,16 @@ async function translateOne(html: string, requester: TranslationRequester): Prom
   if (cached !== undefined) {
     return cached;
   }
-  const runProvider = async (provider: 'bing' | 'google'): Promise<string> => {
-    const value = provider === 'bing'
-      ? await requestBingTranslation(html, requester)
-      : await requestGoogleTranslation(html, requester);
+  const runProvider = async (provider: 'deepl' | 'bing' | 'google'): Promise<string> => {
+    const rawValue = provider === 'deepl'
+      ? await requestDeepLTranslation(html, requester)
+      : provider === 'bing'
+        ? await requestBingTranslation(html, requester)
+        : await requestGoogleTranslation(html, requester);
+    const value = refineCompetitiveProgrammingTranslation(html, rawValue);
     if (!isUsefulChineseTranslation(html, value)) {
-      throw new Error(`${provider === 'bing' ? 'Bing' : 'Google'} 返回的内容仍为英文原文`);
+      const label = provider === 'deepl' ? 'DeepL' : provider === 'bing' ? 'Bing' : 'Google';
+      throw new Error(`${label} 返回的内容仍为英文原文`);
     }
     return value;
   };
@@ -411,10 +522,24 @@ async function translateOne(html: string, requester: TranslationRequester): Prom
       translated = await runProvider(preferredTranslationProvider);
     } catch (error) {
       preferredError = error;
-      if (preferredTranslationProvider === 'google') {
+      if (preferredTranslationProvider === 'deepl') {
+        deepLUnavailableUntil = Date.now() + 5 * 60 * 1000;
+      } else if (preferredTranslationProvider === 'google') {
         googleUnavailableUntil = Date.now() + 10 * 60 * 1000;
       }
       preferredTranslationProvider = undefined;
+    }
+  }
+  // DeepL is the default ordinary translator. Its undocumented web endpoint
+  // can be rate-limited, so a failure enters a short cooldown and immediately
+  // falls through to the existing Bing/Google path.
+  if (translated === undefined && Date.now() >= deepLUnavailableUntil) {
+    try {
+      translated = await runProvider('deepl');
+      preferredTranslationProvider = 'deepl';
+    } catch (error) {
+      preferredError = error;
+      deepLUnavailableUntil = Date.now() + 5 * 60 * 1000;
     }
   }
   if (translated === undefined && !preferredTranslationProvider && translationProviderProbePromise) {
@@ -463,6 +588,7 @@ export function resetTranslationStateForTests(): void {
   translationCache.clear();
   bingSession = undefined;
   bingSessionPromise = undefined;
+  deepLUnavailableUntil = 0;
   googleUnavailableUntil = 0;
   preferredTranslationProvider = undefined;
   translationProviderProbePromise = undefined;
@@ -587,10 +713,12 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
   const enabled = JSON.stringify(options.localizeInterface);
   const auto = JSON.stringify(options.autoTranslateStatements);
   const pageZoom = buildPageZoomClientScript();
+  const translationRefiner = refineCompetitiveProgrammingTranslation.toString();
   const controlledDesktopStyle = JSON.stringify(CONTROLLED_CODEFORCES_DESKTOP_CSS);
   return `<script>(function(){
     ${pageZoom};
     var dictionary=${dictionary};
+    var refineContestTranslation=${translationRefiner};
     var localizationEnabled=${enabled};
     var autoTranslateStatements=${auto};
     var skipSelector='script,style,noscript,pre,code,textarea,[contenteditable="true"],.MathJax,.MathJax_Preview,.tex-span,.ttypography';
@@ -639,7 +767,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         var response=await fetch('/__cf_inline/translate',{method:'POST',headers:{'Content-Type':'application/json','X-CF-Inline':'translate'},body:JSON.stringify({items:batch})});
         var result=await response.json();
         if(!response.ok||!Array.isArray(result.items)||result.items.length!==batch.length) throw new Error(result.error||('HTTP '+response.status));
-        output.push.apply(output,result.items);
+        output.push.apply(output,result.items.map(function(translated,index){return refineContestTranslation(batch[index],translated);}));
       }
       return output;
     }

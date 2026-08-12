@@ -660,7 +660,7 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
     }
     return translateHtmlItems(items, async (translationRequest: TranslationHttpRequest) => {
       const translationUrl = new URL(translationRequest.url);
-      if (['cn.bing.com', 'translate.googleapis.com'].includes(translationUrl.hostname.toLowerCase())) {
+      if (['www2.deepl.com', 'cn.bing.com', 'translate.googleapis.com'].includes(translationUrl.hostname.toLowerCase())) {
         const response = await directHttpRequest({
           url: translationRequest.url,
           method: translationRequest.method,

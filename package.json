@@ -2,7 +2,7 @@
   "name": "vscode-cf-inline",
   "displayName": "Codeforces Inline",
   "description": "在 VS Code 集成浏览器中保留 Codeforces 原文并生成独立中文译文。",
-  "version": "0.9.47",
+  "version": "0.10.6",
   "publisher": "codex-local",
   "author": "zxt-fine",
   "license": "MIT",
@@ -45,6 +45,26 @@
       {
         "command": "cfInline.openLogin",
         "title": "Codeforces Inline: 登录并连接 Edge 会话"
+      },
+      {
+        "command": "cfInline.configureAiTranslation",
+        "title": "Codeforces Inline: 配置 AI 增强翻译"
+      },
+      {
+        "command": "cfInline.selectTranslationMode",
+        "title": "Codeforces Inline: 选择翻译模式"
+      },
+      {
+        "command": "cfInline.setAiApiKey",
+        "title": "Codeforces Inline: 安全保存 AI API Key"
+      },
+      {
+        "command": "cfInline.clearAiApiKey",
+        "title": "Codeforces Inline: 清除 AI API Key"
+      },
+      {
+        "command": "cfInline.testAiTranslation",
+        "title": "Codeforces Inline: 测试 AI 增强翻译连接"
       }
     ],
     "viewsContainers": {
@@ -110,6 +130,40 @@
           "type": "boolean",
           "default": true,
           "description": "自动在英文原题下方生成简体中文译文，并保护代码、公式、图片和样例。"
+        },
+        "cfInline.aiTranslationEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "使用可选 AI 模型结合上下文审校普通译文；关闭时保持原来的免费快速翻译。"
+        },
+        "cfInline.aiProvider": {
+          "type": "string",
+          "enum": ["ollama", "openaiCompatible"],
+          "enumDescriptions": ["本机免费的 Ollama Chat API。", "OpenAI Chat Completions 兼容 API，支持不同厂商和模型。"],
+          "default": "ollama",
+          "description": "AI 增强翻译使用的接口协议。"
+        },
+        "cfInline.aiEndpoint": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "AI 接口根地址或完整接口地址；外部服务必须使用 HTTPS，本机 Ollama 可使用 localhost HTTP。"
+        },
+        "cfInline.aiModel": {
+          "type": "string",
+          "default": "qwen3:8b",
+          "description": "AI 模型名称，例如 qwen3:8b、qwen2.5:7b、gpt-4.1-mini 或 deepseek-chat。"
+        },
+        "cfInline.aiTimeoutMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 5000,
+          "maximum": 300000,
+          "description": "每批 AI 审校请求的超时时间（毫秒）。"
+        },
+        "cfInline.aiFallbackToStandard": {
+          "type": "boolean",
+          "default": true,
+          "description": "AI 接口超时或失败时自动显示普通译文，而不是让整份题面翻译失败。"
         }
       }
     }
