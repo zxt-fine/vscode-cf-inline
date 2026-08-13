@@ -2,7 +2,7 @@
   "name": "vscode-cf-inline",
   "displayName": "Codeforces Inline",
   "description": "在 VS Code 集成浏览器中保留 Codeforces 原文并生成独立中文译文。",
-  "version": "0.10.6",
+  "version": "0.10.9",
   "publisher": "codex-local",
   "author": "zxt-fine",
   "license": "MIT",
@@ -56,7 +56,7 @@
       },
       {
         "command": "cfInline.setAiApiKey",
-        "title": "Codeforces Inline: 安全保存 AI API Key"
+        "title": "Codeforces Inline: 更新并验证 AI API Key"
       },
       {
         "command": "cfInline.clearAiApiKey",
@@ -150,8 +150,8 @@
         },
         "cfInline.aiModel": {
           "type": "string",
-          "default": "qwen3:8b",
-          "description": "AI 模型名称，例如 qwen3:8b、qwen2.5:7b、gpt-4.1-mini 或 deepseek-chat。"
+          "default": "",
+          "description": "AI 服务实际支持的模型 ID，由用户在配置时输入。"
         },
         "cfInline.aiTimeoutMs": {
           "type": "number",

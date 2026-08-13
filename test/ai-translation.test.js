@@ -3,12 +3,44 @@ const http = require('node:http');
 const test = require('node:test');
 
 const {
+  buildAiChatRequestBody,
   enhanceTranslationsWithAi,
   isOllamaModelAvailable,
   normalizedEndpoint,
   parseAiTranslationResponse,
   resetAiTranslationCacheForTests,
 } = require('../out/ai-translation.js');
+
+test('disables deep thinking with provider-compatible request fields', () => {
+  const messages = [{ role: 'user', content: 'translate' }];
+  const deepseek = buildAiChatRequestBody({
+    provider: 'openaiCompatible', endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-v4-pro',
+  }, messages);
+  assert.deepEqual(deepseek.thinking, { type: 'disabled' });
+
+  const gpt5 = buildAiChatRequestBody({
+    provider: 'openaiCompatible', endpoint: 'https://api.openai.com/v1', model: 'gpt-5',
+  }, messages);
+  assert.equal(gpt5.reasoning_effort, 'minimal');
+  assert.equal(gpt5.temperature, undefined);
+
+  const o3 = buildAiChatRequestBody({
+    provider: 'openaiCompatible', endpoint: 'https://api.openai.com/v1', model: 'o3-mini',
+  }, messages);
+  assert.equal(o3.reasoning_effort, 'low');
+  assert.equal(o3.temperature, undefined);
+
+  const custom = buildAiChatRequestBody({
+    provider: 'openaiCompatible', endpoint: 'https://example.com/v1', model: 'reasoning-model',
+  }, messages);
+  assert.equal(custom.thinking, undefined);
+  assert.equal(custom.reasoning_effort, undefined);
+
+  const ollama = buildAiChatRequestBody({
+    provider: 'ollama', endpoint: 'http://127.0.0.1:11434', model: 'qwen3:8b',
+  }, messages);
+  assert.equal(ollama.think, false);
+});
 
 test('recognizes an Ollama profile only when the local model is actually installed', async (t) => {
   const local = await startServer((req, res) => {
@@ -113,6 +145,7 @@ test('supports the local Ollama chat protocol without an API key', async (t) => 
     assert.equal(body.model, 'qwen3:8b');
     assert.equal(body.stream, false);
     assert.equal(body.format, 'json');
+    assert.equal(body.think, false);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ message: { content: JSON.stringify({ items: [{ revised: '轮到 Alice 行动。' }] }) } }));
   });

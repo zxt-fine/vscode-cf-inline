@@ -89,7 +89,8 @@ test('starts a reusable restricted Edge profile with the correct window state', 
   assert.ok(background.includes('--user-data-dir=C:\\profile'));
   assert.equal(background.includes('--disable-extensions'), true);
   assert.equal(background.includes('--disable-sync'), true);
-  assert.ok(background.some((item) => item.startsWith('https://codeforces.com/enter?back=')));
+  assert.ok(background.includes('https://codeforces.com/groups/my'));
+  assert.equal(background.some((item) => item.includes('/enter?back=')), false);
 });
 
 test('keeps login progress visible in the global VS Code status bar', () => {
@@ -135,6 +136,8 @@ test('verifies only My Groups and reuses that document without probing every ent
   assert.doesNotMatch(source, /正在限流预检四个极速入口/);
   assert.match(source, /prefetchedDocuments/);
   assert.match(source, /45_000|45000/);
+  assert.match(source, /waitForVisibleAuthenticatedGroupsDocument\(8_000\)/);
+  assert.match(source, /timeoutMs: 20_000/);
 });
 
 test('warms the translation session only after a verified Edge session is attached', () => {

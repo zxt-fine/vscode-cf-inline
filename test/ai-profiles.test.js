@@ -11,6 +11,7 @@ const {
 
 test('detects provider presets and creates stable non-secret profile identities', () => {
   assert.equal(detectAiService('openaiCompatible', 'https://api.deepseek.com/v1', 'deepseek-chat'), 'deepseek');
+  assert.equal(detectAiService('openaiCompatible', 'https://api.deepseek.com/v1', 'deepseek-v4-flash'), 'deepseek');
   assert.equal(detectAiService('openaiCompatible', 'https://api.openai.com/v1', 'gpt-4.1-mini'), 'openai');
   assert.equal(detectAiService('ollama', 'http://127.0.0.1:11434', 'qwen3:8b'), 'ollama');
   assert.equal(detectAiService('openaiCompatible', 'https://example.com/v1', 'model'), 'custom');

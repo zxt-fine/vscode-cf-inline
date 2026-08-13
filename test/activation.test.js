@@ -62,16 +62,24 @@ test('keeps AI enhancement optional and stores its key only in VS Code SecretSto
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
   assert.equal(manifest.contributes.configuration.properties['cfInline.aiTranslationEnabled'].default, false);
   assert.equal(manifest.contributes.configuration.properties['cfInline.aiProvider'].default, 'ollama');
+  assert.equal(manifest.contributes.configuration.properties['cfInline.aiModel'].default, '');
   assert.match(extensionSource, /context\.secrets\.store\(AI_API_KEY_SECRET/);
   assert.match(extensionSource, /context\.secrets\.get\(AI_API_KEY_SECRET/);
   assert.doesNotMatch(extensionSource, /config\.update\(['"]aiApiKey/);
   assert.match(extensionSource, /AI 增强翻译暂不可用，已使用普通译文/);
-  assert.match(extensionSource, /deepseek-chat（推荐）/);
-  assert.match(extensionSource, /deepseek-reasoner/);
-  assert.match(extensionSource, /接口地址已由插件固定配置，无需手动填写/);
+  assert.doesNotMatch(extensionSource, /deepseek-chat（推荐）|deepseek-reasoner|gpt-4\.1-mini（推荐）|qwen3:8b（推荐）/);
+  assert.match(extensionSource, /title: `填写 \$\{service\.label\} 模型名称`/);
+  assert.match(extensionSource, /prompt: '请填写接口实际支持的模型 ID'/);
+  assert.doesNotMatch(extensionSource, /DeepSeek'.*detail:|OpenAI'.*detail:/);
+  assert.match(extensionSource, /本地 Ollama（免费）'.*detail: '连接 http:\/\/127\.0\.0\.1:11434'/);
   assert.match(extensionSource, /正在验证.*service\.label/);
+  assert.match(extensionSource, /更新并验证 AI API Key/);
   assert.ok(
-    extensionSource.indexOf('const result = await vscode.window.withProgress')
+    extensionSource.indexOf("title: '正在验证 AI API Key…'")
+      < extensionSource.indexOf('context.secrets.store(AI_API_KEY_SECRET, apiKey)')
+  );
+  assert.ok(
+    extensionSource.indexOf('await vscode.window.withProgress')
       < extensionSource.lastIndexOf('activateAiProfile(context, profile')
   );
   assert.match(extensionSource, /配置未保存，API 验证失败/);

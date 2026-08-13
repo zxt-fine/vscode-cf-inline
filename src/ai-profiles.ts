@@ -25,7 +25,7 @@ export function detectAiService(
   if (provider === 'ollama') return 'ollama';
   let hostname = '';
   try { hostname = new URL(endpoint).hostname.toLowerCase(); } catch { /* custom malformed endpoint */ }
-  if ((hostname === 'api.deepseek.com' || hostname.endsWith('.deepseek.com')) && /^deepseek-/i.test(model)) {
+  if (hostname === 'api.deepseek.com' || hostname.endsWith('.deepseek.com')) {
     return 'deepseek';
   }
   if (hostname === 'api.openai.com' || hostname.endsWith('.openai.com')) return 'openai';

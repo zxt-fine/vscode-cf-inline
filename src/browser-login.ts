@@ -63,7 +63,10 @@ export interface CaptureOptions {
 }
 
 const MY_GROUPS_PATH = '/groups/my';
-const LOGIN_URL = `https://codeforces.com/enter?back=${encodeURIComponent(MY_GROUPS_PATH)}`;
+// Open the destination directly. Codeforces redirects anonymous users to its
+// official login page, while a remembered account can immediately reuse the
+// authenticated page without racing an unnecessary /enter redirect.
+const LOGIN_URL = `https://codeforces.com${MY_GROUPS_PATH}`;
 let activeLogin: Promise<void> | undefined;
 let activeRestore: Promise<boolean> | undefined;
 let activeLoginStatus: string | undefined;
@@ -577,11 +580,13 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
     await this.waitForCodeforcesDocument();
     onStatus?.('正在确认账号和“我的群组”入口…');
     const requestUrl = new URL(MY_GROUPS_PATH, 'https://codeforces.com').toString();
-    const response = await this.requestOnce({
+    const visibleDocument = await this.waitForVisibleAuthenticatedGroupsDocument(8_000);
+    const response = visibleDocument ?? await this.requestOnce({
       url: requestUrl,
       method: 'GET',
       headers: { Accept: 'text/html,application/xhtml+xml' },
       body: Buffer.alloc(0),
+      timeoutMs: 20_000,
     });
     assertUsableCodeforcesPage(response, '我的群组');
     assertAuthenticatedCodeforcesPage(response, '我的群组');
@@ -590,6 +595,45 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
     }
     this.prefetchedDocuments.set(requestUrl, { response, expiresAt: Date.now() + 45_000 });
     onStatus?.('账号验证完成；其他入口将在需要时加载，避免触发额外验证。');
+  }
+
+  private async waitForVisibleAuthenticatedGroupsDocument(
+    timeoutMs: number
+  ): Promise<CfTransportResponse | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const evaluated = (await this.pageClient.send('Runtime.evaluate', {
+          expression: `({
+            url: location.href,
+            readyState: document.readyState,
+            html: document.documentElement ? document.documentElement.outerHTML : ''
+          })`,
+          returnByValue: true,
+        }, 5_000)) as {
+          result?: { value?: { url?: string; readyState?: string; html?: string } };
+        };
+        const page = evaluated.result?.value;
+        if (
+          page?.readyState === 'complete'
+          && page.url
+          && page.html
+          && isPersonalGroupsUrl(page.url)
+          && detectCodeforcesAuthentication(page.html, page.url) === 'authenticated'
+        ) {
+          return {
+            statusCode: 200,
+            headers: { 'content-type': 'text/html; charset=utf-8' },
+            body: Buffer.from(page.html, 'utf8'),
+            finalUrl: page.url,
+          };
+        }
+      } catch (err) {
+        if (!isTransientExecutionContextError(err)) throw err;
+      }
+      await delay(250);
+    }
+    return undefined;
   }
 
   async minimizeWindow(): Promise<void> {

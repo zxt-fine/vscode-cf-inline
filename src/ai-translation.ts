@@ -77,11 +77,50 @@ export async function isOllamaModelAvailable(
 function systemPrompt(): string {
   return [
     '你是算法竞赛题目的专业中译审校员。',
+    '不要进行或输出深度思考、推理过程、分析步骤或解释；直接快速完成校对并返回结果。',
     '请结合标题、相邻段落和完整博弈/算法语境，修正中文初稿中的歧义、漏译和术语错误。',
     '例如回合制游戏中的 pass 应译为“跳过本回合”，player to move 应译为“当前回合行动的玩家”；但 passes all tests 仍是“通过所有测试”。',
     '不得修改、删除、增加或调整形如 [[数字]] 的公式/代码占位符，不得翻译变量名、代码或专有名称。',
     '只返回 JSON 对象；items 数组长度及顺序必须与输入一致，每项只包含 revised 字符串：{"items":[{"revised":"..."}]}。',
   ].join('\n');
+}
+
+interface AiChatMessage {
+  role: 'system' | 'user';
+  content: string;
+}
+
+export function buildAiChatRequestBody(
+  options: Pick<AiTranslationOptions, 'provider' | 'endpoint' | 'model'>,
+  messages: AiChatMessage[]
+): Record<string, unknown> {
+  const model = options.model.trim();
+  if (options.provider === 'ollama') {
+    return {
+      model,
+      stream: false,
+      format: 'json',
+      think: false,
+      options: { temperature: 0.1 },
+      messages,
+    };
+  }
+
+  const body: Record<string, unknown> = { model, temperature: 0.1, messages };
+  let hostname = '';
+  try { hostname = new URL(options.endpoint).hostname.toLowerCase(); } catch { /* validated elsewhere */ }
+  if (hostname === 'api.deepseek.com' || hostname.endsWith('.deepseek.com')) {
+    body.thinking = { type: 'disabled' };
+  } else if (hostname === 'api.openai.com' || hostname.endsWith('.openai.com')) {
+    if (/^gpt-5(?:[.-]|$)/i.test(model)) {
+      delete body.temperature;
+      body.reasoning_effort = 'minimal';
+    } else if (/^(?:o1|o3|o4)(?:[.-]|$)/i.test(model)) {
+      delete body.temperature;
+      body.reasoning_effort = 'low';
+    }
+  }
+  return body;
 }
 
 function userPrompt(pairs: TranslationPair[]): string {
@@ -179,13 +218,11 @@ export async function enhanceTranslationsWithAi(
       end += 1;
     }
     const batch = missing.slice(offset, end);
-    const batchMessages = [
+    const batchMessages: AiChatMessage[] = [
       { role: 'system', content: systemPrompt() },
       { role: 'user', content: userPrompt(batch) },
     ];
-    const batchBody = options.provider === 'ollama'
-      ? { model: options.model.trim(), stream: false, format: 'json', options: { temperature: 0.1 }, messages: batchMessages }
-      : { model: options.model.trim(), temperature: 0.1, messages: batchMessages };
+    const batchBody = buildAiChatRequestBody(options, batchMessages);
     const response = await request({
       url: endpoint,
       method: 'POST',
@@ -206,7 +243,7 @@ export async function enhanceTranslationsWithAi(
     if (response.statusCode < 200 || response.statusCode >= 300) {
       const detail = response.body.toString('utf8').replace(/\s+/g, ' ').slice(0, 500);
       if (response.statusCode === 405 && /MethodNotAllowed|Method Not Allowed/i.test(detail)) {
-        throw new Error('AI 接口不接受 Chat Completions 请求，请检查接口地址。DeepSeek 请使用 https://api.deepseek.com/v1，模型使用 deepseek-chat');
+        throw new Error('AI 接口不接受 Chat Completions 请求，请检查接口地址和模型 ID。DeepSeek 请使用 https://api.deepseek.com/v1');
       }
       throw new Error(`AI 接口返回 HTTP ${response.statusCode}${detail ? `：${detail}` : ''}`);
     }

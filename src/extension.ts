@@ -350,9 +350,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       const service = await vscode.window.showQuickPick([
-        { label: 'DeepSeek', value: 'deepseek', detail: '官方 API：api.deepseek.com/v1，推荐模型 deepseek-chat' },
-        { label: '本地 Ollama（免费）', value: 'ollama', detail: '连接 http://127.0.0.1:11434，不需要 API Key' },
-        { label: 'OpenAI', value: 'openai', detail: '官方 API：api.openai.com/v1，推荐模型 gpt-4.1-mini' },
+        { label: 'DeepSeek', value: 'deepseek' },
+        { label: '本地 Ollama（免费）', value: 'ollama', detail: '连接 http://127.0.0.1:11434' },
+        { label: 'OpenAI', value: 'openai' },
         { label: '自定义 OpenAI 兼容 API', value: 'custom', detail: '其他兼容 Chat Completions 的服务商或自建服务' },
         { label: '关闭 AI 增强翻译', value: 'disabled', detail: '恢复普通免费快速翻译，不删除已保存的模型配置或密钥' },
       ], {
@@ -367,23 +367,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         void vscode.window.showInformationMessage('已切换为普通免费翻译');
         return;
       }
-      const modelChoices: Record<string, Array<{ label: string; value: string; detail: string }>> = {
-        deepseek: [
-          { label: 'deepseek-chat（推荐）', value: 'deepseek-chat', detail: '速度较快，适合题面翻译与语境审校' },
-          { label: 'deepseek-reasoner', value: 'deepseek-reasoner', detail: '推理更强，但通常更慢且费用更高' },
-        ],
-        openai: [
-          { label: 'gpt-4.1-mini（推荐）', value: 'gpt-4.1-mini', detail: '速度、价格和翻译质量较均衡' },
-          { label: 'gpt-4o-mini', value: 'gpt-4o-mini', detail: '轻量快速模型' },
-        ],
-        ollama: [
-          { label: 'qwen3:8b（推荐）', value: 'qwen3:8b', detail: '适合本机中文翻译审校' },
-          { label: 'qwen2.5:7b', value: 'qwen2.5:7b', detail: '资源占用较低的中文模型' },
-        ],
-      };
       let protocol: 'ollama' | 'openaiCompatible';
       let endpoint: string;
-      let model: string;
       if (service.value === 'custom') {
         protocol = 'openaiCompatible';
         const customEndpoint = await vscode.window.showInputBox({
@@ -394,22 +379,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           ignoreFocusOut: true,
         });
         if (customEndpoint === undefined) return;
-        const customModel = await vscode.window.showInputBox({
-          title: '自定义模型名称',
-          value: config.get<string>('aiModel') || '',
-          validateInput: (value) => value.trim() ? undefined : '模型名称不能为空',
-          ignoreFocusOut: true,
-        });
-        if (customModel === undefined) return;
         endpoint = customEndpoint.trim();
-        model = customModel.trim();
       } else {
-        const selectedModel = await vscode.window.showQuickPick(modelChoices[service.value], {
-          title: `选择 ${service.label} 模型`,
-          placeHolder: '接口地址已由插件固定配置，无需手动填写',
-        });
-        if (!selectedModel) return;
-        model = selectedModel.value;
         protocol = service.value === 'ollama' ? 'ollama' : 'openaiCompatible';
         endpoint = service.value === 'deepseek'
           ? 'https://api.deepseek.com/v1'
@@ -417,6 +388,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             ? 'https://api.openai.com/v1'
             : 'http://127.0.0.1:11434';
       }
+      const enteredModel = await vscode.window.showInputBox({
+        title: `填写 ${service.label} 模型名称`,
+        prompt: '请填写接口实际支持的模型 ID',
+        value: '',
+        validateInput: (value) => value.trim() ? undefined : '模型名称不能为空',
+        ignoreFocusOut: true,
+      });
+      if (enteredModel === undefined) return;
+      const model = enteredModel.trim();
       let apiKey: string | undefined;
       if (protocol === 'openaiCompatible') {
         const enteredKey = await vscode.window.showInputBox({
@@ -454,9 +434,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.commands.registerCommand('cfInline.setAiApiKey', async () => {
+      const options = await readAiOptions(context);
+      const activeProfileId = context.globalState.get<string>(ACTIVE_AI_PROFILE_STATE);
+      if (!options.enabled || options.provider !== 'openaiCompatible' || !activeProfileId) {
+        void vscode.window.showWarningMessage('请先配置并启用在线 AI 翻译');
+        return;
+      }
       const value = await vscode.window.showInputBox({
-        title: '安全保存 AI API Key',
-        prompt: '密钥存入 VS Code SecretStorage，不会写入 settings.json 或 Git 仓库',
+        title: '更新并验证 AI API Key',
+        prompt: '验证成功后才会安全保存并用于 AI 翻译',
         password: true,
         ignoreFocusOut: true,
       });
@@ -465,10 +451,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         void vscode.window.showWarningMessage('API Key 不能为空；如需删除请执行“清除 AI API Key”。');
         return;
       }
-      await context.secrets.store(AI_API_KEY_SECRET, value.trim());
-      const activeProfileId = context.globalState.get<string>(ACTIVE_AI_PROFILE_STATE);
-      if (activeProfileId) await context.secrets.store(`${AI_PROFILE_SECRET_PREFIX}${activeProfileId}`, value.trim());
-      void vscode.window.showInformationMessage('AI API Key 已安全保存。');
+      const apiKey = value.trim();
+      try {
+        await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: '正在验证 AI API Key…',
+        }, async () => enhanceTranslationsWithAi(
+          [`AI API key verification ${Date.now()}. Reply using the requested JSON format.`],
+          ['AI API Key 验证。'],
+          { ...options, apiKey }
+        ));
+        await context.secrets.store(AI_API_KEY_SECRET, apiKey);
+        await context.secrets.store(`${AI_PROFILE_SECRET_PREFIX}${activeProfileId}`, apiKey);
+        void vscode.window.showInformationMessage('AI API Key 已验证并保存');
+      } catch (err) {
+        void vscode.window.showErrorMessage(`API Key 验证失败：${err instanceof Error ? err.message : String(err)}`);
+      }
     }),
     vscode.commands.registerCommand('cfInline.clearAiApiKey', async () => {
       await context.secrets.delete(AI_API_KEY_SECRET);
