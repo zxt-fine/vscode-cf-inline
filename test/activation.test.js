@@ -13,9 +13,16 @@ test('does not launch Edge while VS Code is merely activating the extension', ()
   assert.match(source, /Do not open Edge during VS Code activation/);
 });
 
-test('relies on VS Code generated activation events for contributed commands', () => {
+test('does not leave an incompatible Edge popup after a newer session succeeds', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
+  const handler = source.match(/edgeBridge\.on\('incompatible',[\s\S]*?\n  \}\);/)?.[0] ?? '';
+  assert.match(handler, /edgeBridge\.connected \|\| proxy\?\.isSessionReady\(\)/);
+  assert.doesNotMatch(handler, /showErrorMessage/);
+});
+
+test('uses startup activation only to repair a restored integrated-browser tab', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.equal(Object.hasOwn(manifest, 'activationEvents'), false);
+  assert.deepEqual(manifest.activationEvents, ['onStartupFinished']);
   assert.deepEqual(manifest.contributes.commands.map((entry) => entry.command), [
     'cfInline.open',
     'cfInline.openIntegratedBrowser',
@@ -34,6 +41,9 @@ test('relies on VS Code generated activation events for contributed commands', (
   assert.match(containerId, /^[A-Za-z0-9_-]+$/);
   assert.equal(manifest.contributes.viewsContainers.activitybar[0].icon, 'assets/codeforces.svg');
   assert.equal(manifest.contributes.views[containerId][0].id, 'cfInline.activityView');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
+  assert.match(source, /restoreIntegratedBrowserIfOpen\(proxy\)/);
+  assert.match(source, /never launches Edge/);
 });
 
 test('registers a native Codeforces activity-bar sidebar without launching Edge', () => {
@@ -120,5 +130,6 @@ test('shows the login panel first and leaves Edge launch to its button', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
   assert.match(source, /The first visible step is always the extension login page/);
   assert.match(source, /CfPanel\.createOrShow\(context, proxy!, edgeBridge\)/);
+  assert.match(source, /CfPanel\.createOrShow\(context, proxy!, edgeBridge, false\)/);
   assert.doesNotMatch(source, /registerCommand\('cfInline\.openLogin',[\s\S]{0,200}loginWithOfficialBrowser/);
 });

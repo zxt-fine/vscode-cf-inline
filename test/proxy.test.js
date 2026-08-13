@@ -250,6 +250,8 @@ test('stores problem practice data and serves the personal dashboard locally', a
   assert.match(dashboard.body.toString('utf8'), /status-label/);
   const fullDashboard = await localRequest(`${proxy.origin}/__cf_inline/dashboard?return=full&path=${encodeURIComponent('/contests?mobile=false')}`);
   assert.match(fullDashboard.body.toString('utf8'), /\/__cf_inline\/full\?path=%2Fcontests%3Fmobile%3Dfalse/);
+  const fastDashboard = await localRequest(`${proxy.origin}/__cf_inline/dashboard?return=fast&path=${encodeURIComponent('/groups/my?mobile=false')}`);
+  assert.match(fastDashboard.body.toString('utf8'), /\/__cf_inline\/fast\?path=%2Fgroups%2Fmy%3Fmobile%3Dfalse/);
   const removed = await localRequest(`${proxy.origin}/__cf_inline/practice/problem?contestId=4&index=A`, { method: 'DELETE', headers: { 'X-CF-Inline': 'practice' } });
   assert.equal(removed.statusCode, 200);
   assert.equal(JSON.parse(removed.body).deleted, true);
@@ -311,6 +313,8 @@ test('serves a lightweight fast-mode shell with only the four primary entries', 
   assert.match(html, /name="cfInlineMain"/);
   assert.match(html, /正在加载 Codeforces/);
   assert.match(html, /正常模式/);
+  assert.match(html, /<\/nav><div class="tools"><button id="normalMode"[^>]*>正常模式<\/button><button id="dashboard"[^>]*>仪表盘<\/button>/);
+  assert.match(html, /__cf_inline\/dashboard\?return=fast/);
   assert.match(html, /id="translationMode"/);
   assert.match(html, /翻译模式/);
   assert.match(html, /__cf_inline\/translation-mode/);
@@ -324,8 +328,15 @@ test('serves a lightweight fast-mode shell with only the four primary entries', 
   assert.match(html, /loginInProgress/);
   assert.match(html, /var wasConnected=true/);
   assert.doesNotMatch(html, /var wasConnected=false/);
+  assert.doesNotMatch(html, /pathText\.textContent=current/);
+  assert.doesNotMatch(html, /正在加载 '\+current/);
+  assert.match(html, /pathText\.textContent=''/);
   assert.match(html, /function prefix\(value,root\)/);
   assert.match(html, /split\(\/\[\?\#\]\//);
+  assert.match(html, /@media\(max-width:900px\)/);
+  assert.match(html, /header\{flex-wrap:wrap;align-items:stretch/);
+  assert.match(html, /nav\{flex:1 1 100%;width:100%;flex-wrap:wrap\}/);
+  assert.match(html, /\.tools\{flex:1 1 100%;width:100%;margin-left:0;justify-content:flex-end\}/);
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)].map((match) => match[1]);
   assert.ok(scripts.length > 0);
   for (const script of scripts) {
@@ -361,6 +372,9 @@ test('serves the complete-site interface and lets users return to fast mode', as
   assert.match(html, /id="relogin"/);
   assert.match(html, /__cf_inline\/relogin/);
   assert.match(html, /loginInProgress/);
+  assert.match(html, /@media\(max-width:760px\)/);
+  assert.match(html, /header\{flex-wrap:wrap;gap:6px;padding:6px\}/);
+  assert.match(html, /\.tools\{flex:1 1 100%;width:100%;margin-left:0;justify-content:flex-end;flex-wrap:wrap\}/);
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)].map((match) => match[1]);
   for (const script of scripts) {
     assert.doesNotThrow(() => new Function(script));

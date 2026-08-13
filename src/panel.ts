@@ -12,20 +12,38 @@ export class CfPanel {
   private readonly proxy: CfProxy;
   private readonly context: vscode.ExtensionContext;
   private readonly bridge: EdgeBridgeServer;
+  private autoSwitchToIntegratedBrowser: boolean;
+  private switchingToIntegratedBrowser = false;
+  private readonly handleSessionChange = (): void => {
+    void this.maybeOpenIntegratedBrowser();
+  };
 
-  static createOrShow(context: vscode.ExtensionContext, proxy: CfProxy, bridge: EdgeBridgeServer): CfPanel {
+  static createOrShow(
+    context: vscode.ExtensionContext,
+    proxy: CfProxy,
+    bridge: EdgeBridgeServer,
+    autoSwitchToIntegratedBrowser = true
+  ): CfPanel {
     if (CfPanel.current) {
+      if (autoSwitchToIntegratedBrowser) CfPanel.current.autoSwitchToIntegratedBrowser = true;
       CfPanel.current.panel.reveal();
+      void CfPanel.current.maybeOpenIntegratedBrowser();
       return CfPanel.current;
     }
-    CfPanel.current = new CfPanel(context, proxy, bridge);
+    CfPanel.current = new CfPanel(context, proxy, bridge, autoSwitchToIntegratedBrowser);
     return CfPanel.current;
   }
 
-  private constructor(context: vscode.ExtensionContext, proxy: CfProxy, bridge: EdgeBridgeServer) {
+  private constructor(
+    context: vscode.ExtensionContext,
+    proxy: CfProxy,
+    bridge: EdgeBridgeServer,
+    autoSwitchToIntegratedBrowser: boolean
+  ) {
     this.context = context;
     this.proxy = proxy;
     this.bridge = bridge;
+    this.autoSwitchToIntegratedBrowser = autoSwitchToIntegratedBrowser;
     this.panel = vscode.window.createWebviewPanel(
       PANEL_TYPE,
       'Codeforces Inline',
@@ -40,9 +58,38 @@ export class CfPanel {
     this.panel.webview.onDidReceiveMessage((message) => {
       void this.handleMessage(message);
     });
+    this.proxy.on('sessionChange', this.handleSessionChange);
     this.panel.onDidDispose(() => {
+      this.proxy.off('sessionChange', this.handleSessionChange);
       CfPanel.current = undefined;
     });
+    void this.maybeOpenIntegratedBrowser();
+  }
+
+  private async maybeOpenIntegratedBrowser(): Promise<boolean> {
+    if (
+      !this.autoSwitchToIntegratedBrowser ||
+      !this.proxy.isLoggedIn() ||
+      !this.proxy.isSessionReady() ||
+      !prefersIntegratedBrowser() ||
+      this.switchingToIntegratedBrowser
+    ) {
+      return false;
+    }
+    this.switchingToIntegratedBrowser = true;
+    try {
+      await openInIntegratedBrowser(this.proxy);
+      this.panel.dispose();
+      return true;
+    } catch (err) {
+      this.post({ type: 'sessionImported' });
+      void vscode.window.showWarningMessage(
+        `Edge 会话已经连接，但无法打开 VS Code 集成浏览器：${err instanceof Error ? err.message : String(err)}`
+      );
+      return false;
+    } finally {
+      this.switchingToIntegratedBrowser = false;
+    }
   }
 
   private async handleMessage(message: unknown): Promise<void> {
@@ -54,19 +101,7 @@ export class CfPanel {
         });
         this.post({ type: 'loginProgress', text: '验证完成，正在加载 Codeforces 页面…' });
         this.post({ type: 'toast', text: 'Codeforces 已连接' });
-        if (prefersIntegratedBrowser()) {
-          try {
-            this.post({ type: 'loginProgress', text: '正在打开 VS Code 集成浏览器…' });
-            await openInIntegratedBrowser(this.proxy);
-            this.post({ type: 'loginProgress', text: 'VS Code 集成浏览器已打开。' });
-            this.panel.dispose();
-          } catch (err) {
-            this.post({ type: 'sessionImported' });
-            void vscode.window.showWarningMessage(
-              `Edge 会话已经连接，但无法打开 VS Code 集成浏览器：${err instanceof Error ? err.message : String(err)}`
-            );
-          }
-        } else {
+        if (!(await this.maybeOpenIntegratedBrowser())) {
           this.post({ type: 'sessionImported' });
         }
       } catch (err) {

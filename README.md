@@ -1,7 +1,7 @@
 # Codeforces Inline
 
 [![CI](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml/badge.svg)](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.11.9-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
+[![Version](https://img.shields.io/badge/version-0.11.19-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 一个面向中文竞赛编程用户的 VS Code 扩展：在 VS Code 集成浏览器中浏览 Codeforces，保留英文或俄文原题，在原文下方生成独立中文译文，并支持登录、群组、提交和评测结果跟踪。
@@ -62,10 +62,16 @@
 
 ### 从 VSIX 安装
 
-1. 获取项目发布的 `.vsix` 安装包，或按照下方说明自行打包。
+推荐从 [GitHub Releases](https://github.com/zxt-fine/vscode-cf-inline/releases) 下载 `codeforces-inline-<版本>-complete.zip`。完整安装包同时包含 VSIX、Edge 配套扩展和安装说明，无需分别下载。
+
+1. 解压完整安装包。
 2. 打开 VS Code 扩展面板。
 3. 点击右上角 `…`，选择 `Install from VSIX...`。
-4. 选择安装包并执行一次“开发人员: 重新加载窗口”。
+4. 选择解压目录中的 `.vsix` 文件。
+5. 在 Edge 打开 `edge://extensions`，开启开发人员模式，选择“加载解压缩的扩展”，加载同一目录中的 `edge-extension` 文件夹。
+6. 回到 VS Code 执行一次“开发人员: 重新加载窗口”。
+
+Release 中仍保留单独的 `.vsix`，供已经安装配套 Edge 扩展的用户直接升级。
 
 ### 从源码构建
 

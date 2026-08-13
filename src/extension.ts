@@ -13,7 +13,7 @@ import {
   upsertAiProfile,
 } from './ai-profiles';
 import { EdgeBridgeServer, loginWithEdgeBridge, restoreEdgeBridgeSession, revealEdgeExtension } from './edge-bridge';
-import { prefersIntegratedBrowser, openInIntegratedBrowser } from './integrated-browser';
+import { prefersIntegratedBrowser, openInIntegratedBrowser, restoreIntegratedBrowserIfOpen } from './integrated-browser';
 import { CfPanel } from './panel';
 import { CfProxy } from './proxy';
 import { registerCfSidebar } from './sidebar';
@@ -307,6 +307,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   });
   await proxy.start();
+  // VS Code restores integrated-browser editors before their loopback server
+  // exists. If one of our tabs survived the previous window, reuse it and
+  // navigate it to the newly started server. This never creates a page when
+  // the user had closed the Codeforces tab, and it never launches Edge.
+  await restoreIntegratedBrowserIfOpen(proxy).catch(() => undefined);
   const edgeBridge = new EdgeBridgeServer();
   await edgeBridge.start();
   context.subscriptions.push(edgeBridge);
@@ -345,8 +350,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (!proxy?.isSessionReady() && edgeBridge.sessionSnapshot) void restoreEdgeBridgeSession(edgeBridge, proxy!);
   });
   edgeBridge.on('incompatible', (message: string) => {
+    // Keep protocol diagnostics in the extension UI. VS Code notifications
+    // cannot be recalled if a newer connection succeeds moments later, so a
+    // transient or stale bridge must never leave an incorrect popup behind.
+    if (edgeBridge.connected || proxy?.isSessionReady()) return;
     proxy?.setLoginProgress(false, message);
-    void vscode.window.showErrorMessage(message);
   });
 
   context.subscriptions.push(
@@ -377,7 +385,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.commands.registerCommand('cfInline.openPanel', () => {
-      CfPanel.createOrShow(context, proxy!, edgeBridge);
+      CfPanel.createOrShow(context, proxy!, edgeBridge, false);
     }),
     vscode.commands.registerCommand('cfInline.openLogin', () => {
       CfPanel.createOrShow(context, proxy!, edgeBridge);

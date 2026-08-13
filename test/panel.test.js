@@ -36,6 +36,10 @@ test('webview reports connected only for a verified account and acquires VS Code
   const proxy = {
     origin: 'http://127.0.0.1:45678',
     currentUrlPath: '/groups/my',
+    isLoggedIn() { return false; },
+    isSessionReady() { return false; },
+    on() {},
+    off() {},
   };
   CfPanel.createOrShow(context, proxy, { connected: false });
   const html = createdPanel.webview.html;
@@ -76,4 +80,13 @@ test('webview reports connected only for a verified account and acquires VS Code
   assert.match(html, /data\.__cfInlinePageError/);
   assert.match(html, /frame\.src = 'about:blank'/);
   assert.doesNotMatch(html, /id="submit"|type: 'submit'/);
+});
+
+test('activity login panel switches to the integrated browser after a restored Edge session', () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'src', 'panel.ts'), 'utf8');
+  assert.match(source, /proxy\.on\('sessionChange', this\.handleSessionChange\)/);
+  assert.match(source, /private async maybeOpenIntegratedBrowser/);
+  assert.match(source, /await openInIntegratedBrowser\(this\.proxy\)/);
+  assert.match(source, /this\.panel\.dispose\(\)/);
+  assert.match(source, /proxy\.off\('sessionChange', this\.handleSessionChange\)/);
 });

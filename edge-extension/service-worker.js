@@ -26,7 +26,16 @@ function tryPort(index) {
     }, 20000);
     chrome.action.setBadgeText({ text: 'ON' });
     chrome.action.setBadgeBackgroundColor({ color: '#16883f' });
-    publishSession(candidate, 'ready');
+    // Confirm the bridge protocol immediately. Reading cookies and inspecting
+    // a Codeforces tab can be slow, so publish that state separately instead
+    // of making the protocol handshake wait for page inspection.
+    candidate.send(JSON.stringify({
+      type: 'ready',
+      protocol: BRIDGE_PROTOCOL,
+      userAgent: navigator.userAgent,
+      valid: false
+    }));
+    publishSession(candidate, 'sessionState');
   };
   candidate.onmessage = (event) => handleMessage(candidate, event.data);
   candidate.onerror = () => undefined;
@@ -74,9 +83,24 @@ async function handleMessage(channel, raw) {
 async function runTask(action, payload, progress) {
   if (action === 'loginState') return { valid: await hasAuthenticatedSession() };
   if (action === 'authenticate') return authenticate(!!payload.interactive, progress);
+  if (action === 'minimizeCodeforcesWindow') return minimizeCodeforcesWindow();
   if (action === 'request') return browserRequest(payload);
   if (action === 'submit') return submitSolution(payload, progress);
   throw new Error(`不支持的桥接任务：${action}`);
+}
+
+async function minimizeCodeforcesWindow() {
+  const activeTabs = await chrome.tabs.query({ active: true, url: ['https://codeforces.com/*'] });
+  let tab = activeTabs.find((candidate) => typeof candidate.windowId === 'number');
+  if (!tab) {
+    const tabs = await chrome.tabs.query({ url: ['https://codeforces.com/*'] });
+    tab = tabs
+      .filter((candidate) => typeof candidate.windowId === 'number')
+      .sort((left, right) => Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0))[0];
+  }
+  if (!tab || typeof tab.windowId !== 'number') return { minimized: false };
+  await chrome.windows.update(tab.windowId, { state: 'minimized' });
+  return { minimized: true };
 }
 
 async function codeforcesCookies() {
@@ -171,7 +195,8 @@ async function ensureExecutionTab(active = false) {
 
 async function browserRequest(request) {
   const tab = await ensureExecutionTab(false);
-  const [{ result }] = await chrome.scripting.executeScript({
+  const timeoutMs = Math.max(10000, Number(request.timeoutMs) || 30000);
+  const [{ result }] = await withTimeout(chrome.scripting.executeScript({
     target: { tabId: tab.id },
     world: 'MAIN',
     func: async (input) => {
@@ -180,11 +205,9 @@ async function browserRequest(request) {
       try {
         const bytes = input.bodyBase64 ? Uint8Array.from(atob(input.bodyBase64), (char) => char.charCodeAt(0)) : undefined;
         const method = String(input.method || 'GET').toUpperCase();
-        const isCacheableAsset = method === 'GET' && !/\btext\/html\b/i.test(String(input.headers?.Accept || input.headers?.accept || '')) &&
-          /\.(?:css|js|mjs|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|map)(?:[?#]|$)/i.test(input.url);
         const response = await fetch(input.url, {
           method: input.method, headers: input.headers, body: bytes && bytes.length ? bytes : undefined,
-          credentials: 'include', redirect: 'follow', cache: isCacheableAsset ? 'default' : 'no-store', signal: controller.signal
+          credentials: 'include', redirect: 'follow', cache: method === 'GET' ? 'default' : 'no-store', signal: controller.signal
         });
         const buffer = new Uint8Array(await response.arrayBuffer());
         let binary = '';
@@ -193,9 +216,19 @@ async function browserRequest(request) {
       } finally { clearTimeout(timer); }
     },
     args: [request]
-  });
+  }), timeoutMs + 2000, 'Edge 页面脚本执行超时');
   if (!result) throw new Error('日常 Edge 页面没有返回请求结果');
   return result;
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); }
+    );
+  });
 }
 
 async function submitSolution(request, progress) {

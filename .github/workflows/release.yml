@@ -1,4 +1,4 @@
-name: Release VSIX
+name: Release installation bundle
 
 on:
   push:
@@ -42,9 +42,27 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "tag=v$version" >> $env:GITHUB_OUTPUT
           "asset=vscode-cf-inline-$version.vsix" >> $env:GITHUB_OUTPUT
+          "bundle=codeforces-inline-$version-complete.zip" >> $env:GITHUB_OUTPUT
 
       - name: Package extension
         run: npm run package -- --out ${{ steps.version.outputs.asset }}
+
+      - name: Package VSIX and Edge extension together
+        shell: pwsh
+        run: |
+          $bundleRoot = Join-Path $env:RUNNER_TEMP 'codeforces-inline-complete'
+          New-Item -ItemType Directory -Path $bundleRoot | Out-Null
+          Copy-Item '${{ steps.version.outputs.asset }}' $bundleRoot
+          Copy-Item 'edge-extension' (Join-Path $bundleRoot 'edge-extension') -Recurse
+          @'
+          Codeforces Inline 完整安装包
+
+          1. 在 VS Code 扩展页面右上角选择“从 VSIX 安装”，选择本目录中的 .vsix 文件。
+          2. 在 Edge 打开 edge://extensions，开启“开发人员模式”。
+          3. 点击“加载解压缩的扩展”，选择本目录中的 edge-extension 文件夹。
+          4. 在 VS Code 执行“开发人员: 重新加载窗口”，然后打开 Codeforces Inline。
+          '@ | Set-Content (Join-Path $bundleRoot '安装说明.txt') -Encoding utf8
+          Compress-Archive -Path (Join-Path $bundleRoot '*') -DestinationPath '${{ steps.version.outputs.bundle }}' -Force
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -57,7 +75,9 @@ jobs:
 
             本版本新增题目收藏、刷题状态、个人备注和刷题仪表盘，完善登录与提交稳定性，并修复英文/俄文题面翻译、俄文界面汉化及时间/内存限制显示问题。
 
-            下载下方 VSIX 后，在 VS Code 中执行“扩展：从 VSIX 安装”。完整更新记录请查看 CHANGELOG.md。
-          files: ${{ steps.version.outputs.asset }}
+            推荐下载 `complete.zip` 完整安装包，其中同时包含 VSIX、Edge 配套扩展和安装说明；也可以只下载 VSIX。完整更新记录请查看 CHANGELOG.md。
+          files: |
+            ${{ steps.version.outputs.asset }}
+            ${{ steps.version.outputs.bundle }}
           fail_on_unmatched_files: true
           overwrite_files: true

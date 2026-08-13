@@ -1,6 +1,7 @@
 node_modules/
 out/
 *.vsix
+codeforces-inline-*-complete.zip
 .tmp/
 coverage/
 *.log

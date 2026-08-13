@@ -30,6 +30,13 @@ async function closeDuplicateCodeforcesBrowserTabs(): Promise<void> {
   }
 }
 
+export function hasRestoredCodeforcesBrowserTab(proxy: Pick<CfProxy, 'origin'>): boolean {
+  const host = new URL(proxy.origin).host;
+  return vscode.window.tabGroups.all
+    .flatMap((group) => [...group.tabs])
+    .some((tab) => isCodeforcesBrowserTabLabel(tab.label) || tab.label.trim() === host);
+}
+
 export function prefersIntegratedBrowser(): boolean {
   return vscode.workspace
     .getConfiguration('cfInline')
@@ -93,4 +100,16 @@ export async function openInIntegratedBrowser(proxy: CfProxy): Promise<void> {
     return;
   }
   throw new Error('当前 VS Code 版本没有可用的集成浏览器，请升级 VS Code 或改用内嵌面板');
+}
+
+export async function restoreIntegratedBrowserIfOpen(proxy: CfProxy): Promise<boolean> {
+  if (!prefersIntegratedBrowser() || !hasRestoredCodeforcesBrowserTab(proxy)) return false;
+  const commands = new Set(await vscode.commands.getCommands(true));
+  if (!commands.has(NATIVE_BROWSER_COMMAND)) return false;
+  await vscode.commands.executeCommand(NATIVE_BROWSER_COMMAND, {
+    url: integratedBrowserUrl(proxy),
+    reuseUrlFilter: integratedBrowserReuseFilter(proxy),
+  } satisfies NativeBrowserOpenOptions);
+  await closeDuplicateCodeforcesBrowserTabs();
+  return true;
 }

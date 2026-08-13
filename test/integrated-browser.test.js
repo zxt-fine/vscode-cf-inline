@@ -40,9 +40,11 @@ Module._load = function (request, parent, isMain) {
 const {
   integratedBrowserUrl,
   integratedBrowserReuseFilter,
+  hasRestoredCodeforcesBrowserTab,
   isCodeforcesBrowserTabLabel,
   openInIntegratedBrowser,
   prefersIntegratedBrowser,
+  restoreIntegratedBrowserIfOpen,
 } = require('../out/integrated-browser.js');
 
 function connectedProxy(path = '/groups/my') {
@@ -108,6 +110,35 @@ test('keeps the active Codeforces browser tab and closes existing duplicates', a
     assert.deepEqual(closedTabs, [first, normal]);
     assert.equal(isCodeforcesBrowserTabLabel(source.label), false);
     assert.equal(isCodeforcesBrowserTabLabel(active.label), true);
+  } finally {
+    activeTabGroup.tabs = [];
+    activeTabGroup.activeTab = undefined;
+  }
+});
+
+test('repairs a restored Codeforces browser editor without creating one when absent', async () => {
+  calls.length = 0;
+  availableCommands = ['workbench.action.browser.open'];
+  const restored = { label: '127.0.0.1:45678', isActive: true, isDirty: false };
+  activeTabGroup.tabs = [restored];
+  activeTabGroup.activeTab = restored;
+  try {
+    const proxy = connectedProxy('/groups/my');
+    assert.equal(hasRestoredCodeforcesBrowserTab(proxy), true);
+    assert.equal(await restoreIntegratedBrowserIfOpen(proxy), true);
+    assert.deepEqual(calls, [[
+      'workbench.action.browser.open',
+      {
+        url: 'http://127.0.0.1:45678/__cf_inline/fast',
+        reuseUrlFilter: 'http://127.0.0.1:45678/__cf_inline/*',
+      },
+    ]]);
+
+    calls.length = 0;
+    activeTabGroup.tabs = [{ label: 'main.cpp', isActive: true, isDirty: false }];
+    activeTabGroup.activeTab = activeTabGroup.tabs[0];
+    assert.equal(await restoreIntegratedBrowserIfOpen(proxy), false);
+    assert.deepEqual(calls, []);
   } finally {
     activeTabGroup.tabs = [];
     activeTabGroup.activeTab = undefined;

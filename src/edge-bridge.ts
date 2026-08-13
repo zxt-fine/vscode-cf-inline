@@ -124,10 +124,13 @@ export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable 
     this.handshakeTimer = setTimeout(() => {
       if (this.socket === client && !this.protocolReady) {
         client.close(4001, 'bridge protocol handshake missing');
-        this.emit('incompatible', '配套 Edge 扩展版本过旧，请在 Edge 扩展页点击“重新加载”');
+        this.emit('incompatible', '配套 Edge 扩展已连接，但协议确认超时；请稍后重新连接');
       }
-    }, 3_000);
-    client.on('message', (data) => this.receive(data.toString()));
+    // Older compatible bridge builds confirm the protocol only after reading
+    // cookies and inspecting an existing Codeforces tab. Keep enough time for
+    // that work so a slow page is never misreported as an outdated extension.
+    }, 30_000);
+    client.on('message', (data) => this.receive(data.toString(), client));
     client.on('close', () => {
       if (this.socket !== client) return;
       this.socket = undefined;
@@ -141,7 +144,11 @@ export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable 
     client.send(JSON.stringify({ type: 'hello', protocol: BRIDGE_PROTOCOL }));
   }
 
-  private receive(raw: string): void {
+  private receive(raw: string, source: WebSocket): void {
+    // A replaced socket can still deliver a queued message after a newer Edge
+    // connection has become active. Never let that stale message alter the
+    // protocol or session state of the current connection.
+    if (this.socket !== source) return;
     let message: { type?: string; protocol?: number; id?: number; ok?: boolean; value?: BridgeResult; error?: string; message?: string; cookies?: BrowserCookie[]; userAgent?: string; valid?: boolean };
     try { message = JSON.parse(raw); } catch { return; }
     if (message.type === 'ready') {
@@ -250,12 +257,21 @@ class EdgeBridgeTransport implements CfUpstreamTransport {
 
   async request(request: CfTransportRequest): Promise<CfTransportResponse> {
     if (!this.isAlive()) throw new Error('日常 Edge 会话已断开');
-    const value = await this.bridge.run('request', {
+    const payload = {
       ...request,
       bodyBase64: request.body.toString('base64'),
       body: undefined,
-    }, Math.max(20_000, request.timeoutMs ?? 0) + 15_000);
-    return decodeResponse(value);
+    };
+    const timeoutMs = Math.max(20_000, request.timeoutMs ?? 0) + 15_000;
+    const retryable = /^(?:GET|HEAD)$/i.test(request.method);
+    try {
+      return decodeResponse(await this.bridge.run('request', payload, timeoutMs));
+    } catch (error) {
+      if (!retryable || !this.isAlive() || !isTransientBridgeRequestError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      if (!this.isAlive()) throw error;
+      return decodeResponse(await this.bridge.run('request', payload, timeoutMs));
+    }
   }
 
   async submitSolution(request: CfBrowserSubmissionRequest): Promise<CfTransportResponse> {
@@ -295,6 +311,11 @@ function decodeResponse(value: BridgeResult): CfTransportResponse {
   };
 }
 
+function isTransientBridgeRequestError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /超时|timeout|timed out|aborted|signal|message port|frame (?:was )?removed|cannot access contents/i.test(message);
+}
+
 let activeLogin: Promise<void> | undefined;
 
 export function loginWithEdgeBridge(
@@ -306,10 +327,12 @@ export function loginWithEdgeBridge(
   if (activeLogin) return activeLogin;
   if (proxy.isLoggedIn() && proxy.isSessionReady()) return Promise.resolve();
   const login = (async () => {
+    let openedEdgeForLogin = false;
     if (!bridge.connected) {
       if (!interactive) throw new Error('日常 Edge 尚未运行');
       onStatus?.('正在打开日常 Edge；请勿关闭登录或验证标签页…');
       await vscode.env.openExternal(vscode.Uri.parse('https://codeforces.com/'));
+      openedEdgeForLogin = true;
       await bridge.waitForConnection(20_000);
     }
     onStatus?.('正在读取日常 Edge 的 Codeforces 登录状态…');
@@ -318,6 +341,7 @@ export function loginWithEdgeBridge(
       if (!interactive) throw error;
       onStatus?.('正在日常 Edge 中打开 Codeforces 官方登录页…');
       await vscode.env.openExternal(vscode.Uri.parse('https://codeforces.com/enter?back=%2F&mobile=false'));
+      openedEdgeForLogin = true;
       onStatus?.('请在日常 Edge 中完成账号登录；只有网站实际显示人机验证时才需要验证，请勿关闭该标签页');
       return bridge.run('authenticate', { interactive: true }, 10 * 60_000, onStatus);
     });
@@ -340,6 +364,10 @@ export function loginWithEdgeBridge(
     const transport = new EdgeBridgeTransport(bridge);
     try {
       proxy.attachBrowserSession(cookies, result.userAgent || 'Microsoft Edge', transport);
+      if (openedEdgeForLogin) {
+        onStatus?.('登录状态已获取，正在最小化 Edge…');
+        await bridge.run('minimizeCodeforcesWindow', {}, 8_000).catch(() => undefined);
+      }
       onStatus?.('日常 Edge 会话已连接');
     } catch (error) {
       await transport.dispose();
