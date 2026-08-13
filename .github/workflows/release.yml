@@ -46,16 +46,11 @@ jobs:
       - name: Package extension
         run: npm run package -- --out ${{ steps.version.outputs.asset }}
 
-      - name: Verify release tag
-        shell: pwsh
-        run: |
-          git fetch origin tag "${{ steps.version.outputs.tag }}"
-          git rev-parse "${{ steps.version.outputs.tag }}^{commit}"
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: Codeforces Inline ${{ steps.version.outputs.tag }}
           body: |
             Codeforces Inline ${{ steps.version.outputs.version }} 已发布。
