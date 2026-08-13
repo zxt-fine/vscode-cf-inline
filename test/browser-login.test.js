@@ -66,6 +66,21 @@ test('requires both the account profile and logout controls to confirm authentic
   );
 });
 
+test('accepts an authenticated own-profile page when the handle is plain text', () => {
+  const html = `<!doctype html><html><body>
+    <strong>zxt_3186525831</strong>
+    <a href="/logout">退出登录</a>
+  </body></html>`;
+  assert.equal(
+    detectCodeforcesAuthentication(html, 'https://codeforces.com/profile/zxt_3186525831'),
+    'authenticated'
+  );
+  assert.equal(
+    detectCodeforcesAuthentication('<a href="/logout">Logout</a>', 'https://codeforces.com/problemset'),
+    'unknown'
+  );
+});
+
 test('accepts only the account-specific groups endpoint as My Groups', () => {
   assert.equal(isPersonalGroupsUrl('https://codeforces.com/groups/my'), true);
   assert.equal(isPersonalGroupsUrl('https://codeforces.com/groups/my/'), true);
@@ -173,6 +188,12 @@ test('requires visible account confirmation and never accepts a stale cookie on 
   assert.match(captureSource, /waitForDevToolsTarget\(port, loginTargetId\)/);
   assert.match(source, /page\.readyState === 'complete'/);
   assert.match(source, /consecutiveAuthenticated >= 2/);
+  assert.match(source, /page\.readyState !== 'loading'/);
+  assert.match(captureSource, /atomic snapshot/);
+  assert.ok(
+    source.indexOf('lastState = detectCodeforcesAuthentication(page.html, page.url)') <
+      source.indexOf("lastState !== 'authenticated' && isCloudflareChallenge(page.html, 200)")
+  );
 });
 
 test('warms the translation session only after a verified Edge session is attached', () => {

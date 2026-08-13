@@ -37,7 +37,7 @@ test('webview reports connected only for a verified account and acquires VS Code
     origin: 'http://127.0.0.1:45678',
     currentUrlPath: '/groups/my',
   };
-  CfPanel.createOrShow(context, proxy);
+  CfPanel.createOrShow(context, proxy, { connected: false });
   const html = createdPanel.webview.html;
 
   assert.equal((html.match(/acquireVsCodeApi\(\)/g) || []).length, 1);
@@ -46,9 +46,9 @@ test('webview reports connected only for a verified account and acquires VS Code
   assert.doesNotMatch(html, /fetch\(origin \+ '\/__cf_inline\/state'/);
   assert.match(html, /const connected = !!state\.sessionReady && !!state\.loggedIn/);
   assert.match(html, /已登录 · Edge 已连接/);
-  assert.match(html, /真正的 Microsoft Edge/);
-  assert.match(html, /关闭扩展与同步/);
-  assert.match(html, /自行提供桌面版中文界面/);
+  assert.match(html, /保持 Edge 登录会话/);
+  assert.match(html, /首次安装配套扩展/);
+  assert.doesNotMatch(html, /id="installEdgeExtension"/);
   assert.doesNotMatch(html, /保存登录|saveLogin/);
   for (const pathname of ['/groups/my', '/contests', '/gyms', '/problemset']) {
     assert.match(html, new RegExp(`data-path="${pathname}"`));
@@ -58,7 +58,7 @@ test('webview reports connected only for a verified account and acquires VS Code
   assert.match(html, /id="loginStage"/);
   assert.match(html, /id="loginProgressBar"/);
   assert.match(html, /function updateLoginProgress\(text\)/);
-  assert.match(html, /let currentLoginStage = '正在打开 Edge 登录页面…'/);
+  assert.match(html, /let currentLoginStage = '正在连接 Edge…'/);
   assert.match(html, /正在验证 我的群组/);
   assert.match(html, /正在验证 比赛/);
   assert.match(html, /正在验证 训练营/);

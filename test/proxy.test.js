@@ -322,6 +322,8 @@ test('serves a lightweight fast-mode shell with only the four primary entries', 
   assert.match(html, /id="relogin"/);
   assert.match(html, /__cf_inline\/relogin/);
   assert.match(html, /loginInProgress/);
+  assert.match(html, /var wasConnected=true/);
+  assert.doesNotMatch(html, /var wasConnected=false/);
   assert.match(html, /function prefix\(value,root\)/);
   assert.match(html, /split\(\/\[\?\#\]\//);
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)].map((match) => match[1]);
@@ -870,10 +872,12 @@ test('reports transport failures to the main frame instead of leaving loading in
   assert.equal(page.statusCode, 502);
   assert.match(page.body.toString('utf8'), /__cfInlinePageError/);
   assert.match(page.body.toString('utf8'), /Edge window closed/);
-  assert.match(page.body.toString('utf8'), /state\.sessionReady&&state\.loggedIn/);
+  assert.match(page.body.toString('utf8'), /requestedLogin&&connected/);
   assert.match(page.body.toString('utf8'), /location\.reload\(\)/);
   assert.match(page.body.toString('utf8'), /id="relogin"/);
-  assert.match(page.body.toString('utf8'), /重新登录/);
+  assert.match(page.body.toString('utf8'), /重新连接 Edge/);
+  assert.match(page.body.toString('utf8'), /id="retry"/);
+  assert.match(page.body.toString('utf8'), /本次网页请求没有成功/);
   assert.match(page.body.toString('utf8'), /__cf_inline\/relogin/);
 });
 

@@ -4,6 +4,7 @@
 .gitattributes
 src/**
 test/**
+!edge-extension/**
 tsconfig.json
 .gitignore
 CONTRIBUTING.md

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { loginWithOfficialBrowser } from './browser-login';
+import { EdgeBridgeServer, loginWithEdgeBridge, revealEdgeExtension } from './edge-bridge';
 import { openInIntegratedBrowser, prefersIntegratedBrowser } from './integrated-browser';
 import { CfProxy } from './proxy';
 
@@ -11,19 +11,21 @@ export class CfPanel {
   private readonly panel: vscode.WebviewPanel;
   private readonly proxy: CfProxy;
   private readonly context: vscode.ExtensionContext;
+  private readonly bridge: EdgeBridgeServer;
 
-  static createOrShow(context: vscode.ExtensionContext, proxy: CfProxy): CfPanel {
+  static createOrShow(context: vscode.ExtensionContext, proxy: CfProxy, bridge: EdgeBridgeServer): CfPanel {
     if (CfPanel.current) {
       CfPanel.current.panel.reveal();
       return CfPanel.current;
     }
-    CfPanel.current = new CfPanel(context, proxy);
+    CfPanel.current = new CfPanel(context, proxy, bridge);
     return CfPanel.current;
   }
 
-  private constructor(context: vscode.ExtensionContext, proxy: CfProxy) {
+  private constructor(context: vscode.ExtensionContext, proxy: CfProxy, bridge: EdgeBridgeServer) {
     this.context = context;
     this.proxy = proxy;
+    this.bridge = bridge;
     this.panel = vscode.window.createWebviewPanel(
       PANEL_TYPE,
       'Codeforces Inline',
@@ -47,7 +49,7 @@ export class CfPanel {
     const type = (message as { type?: string }).type;
     if (type === 'openLogin') {
       try {
-        await loginWithOfficialBrowser(this.context, this.proxy, (text) => {
+        await loginWithEdgeBridge(this.bridge, this.proxy, (text) => {
           this.post({ type: 'loginProgress', text });
         });
         this.post({ type: 'loginProgress', text: '验证完成，正在加载 Codeforces 页面…' });
@@ -73,6 +75,10 @@ export class CfPanel {
         this.post({ type: 'toast', text });
         void vscode.window.showErrorMessage(text);
       }
+      return;
+    }
+    if (type === 'installEdgeExtension') {
+      await revealEdgeExtension(this.context);
       return;
     }
   }
@@ -153,7 +159,7 @@ export class CfPanel {
       <button class="nav" data-path="/problemset">题库</button>
     </div>
     <input id="url" type="text" readonly spellcheck="false" title="当前页面路径，由插件自动更新">
-    <button id="login" title="在 Edge 官方网页完成登录；登录后不要关闭 Edge">连接 Edge 会话</button>
+    <button id="login" title="连接 Edge 中的 Codeforces 登录状态">连接 Edge 会话</button>
     <div class="status"><span id="dot" class="dot off"></span><span id="statusText">未连接</span></div>
   </div>
   <div class="content">
@@ -170,16 +176,17 @@ export class CfPanel {
     <div id="gate" class="gate">
       <div class="gate-inner">
         <h2 id="gateTitle">尚未连接 Codeforces Edge 会话</h2>
-        <p>点击下方按钮后在 Edge 官方页面完成验证和登录。插件会确认页面中的真实账号状态，并核验“我的群组、比赛、训练营、题库”四个入口，全部通过后才返回 VS Code；Edge 随后最小化并在后台提供网页。</p>
-        <div class="edge-warning"><strong>注意：</strong>这是真正的 Microsoft Edge，使用插件专用受控配置并关闭扩展与同步。插件会自行提供桌面版中文界面，不依赖日常 Edge 或 Codeforces Better。登录完成后不要关闭该 Edge 窗口。</div>
+        <p>点击下方按钮连接 Edge 中的 Codeforces 登录状态。若尚未安装配套扩展，可先点击“首次安装配套扩展”。</p>
+        <div class="edge-warning"><strong>注意：</strong>配套扩展只用于保持 Edge 登录会话，VS Code 中的 Codeforces 浏览界面和功能保持不变。</div>
         <div id="loginProgress" class="login-progress hidden" role="status" aria-live="polite">
           <div class="login-progress-row">
             <div class="login-spinner"></div>
-            <div id="loginStage">正在打开 Edge 登录页面…</div>
+            <div id="loginStage">正在连接 Edge…</div>
           </div>
           <div class="login-progress-track"><div id="loginProgressBar"></div></div>
         </div>
-        <button id="gateLogin" class="primary">打开 Edge 登录（登录后请勿关闭）</button>
+        <button id="gateInstall">首次安装配套扩展</button>
+        <button id="gateLogin" class="primary">连接 Edge 会话</button>
       </div>
     </div>
   </div>
@@ -213,7 +220,7 @@ export class CfPanel {
       let frameLoaded = false;
       let hasReceivedState = false;
       let loginPending = false;
-      let currentLoginStage = '正在打开 Edge 登录页面…';
+      let currentLoginStage = '正在连接 Edge…';
       let loginProgressValue = 0;
       let toastTimer;
       let progressTimer;
@@ -287,8 +294,8 @@ export class CfPanel {
       }
 
       function loginStageProgress(text) {
-        if (text.includes('正在打开 Codeforces 官方登录页面')) return 10;
-        if (text.includes('请在浏览器中完成人机验证和登录')) return 20;
+        if (text.includes('正在连接日常 Edge') || text.includes('正在读取日常 Edge')) return 10;
+        if (text.includes('打开 Codeforces 官方登录页') || text.includes('请在日常 Edge')) return 20;
         if (text.includes('已检测到账号')) return 34;
         if (text.includes('正在限流预检')) return 40;
         if (text.includes('预处理进度 1/4')) return 51;
@@ -300,7 +307,7 @@ export class CfPanel {
         if (text.includes('正在验证 比赛')) return 60;
         if (text.includes('正在验证 训练营')) return 72;
         if (text.includes('正在验证 题库')) return 84;
-        if (text.includes('最小化 Edge') || text.includes('建立安全会话') || text.includes('正在连接 Codeforces 会话')) return 92;
+        if (text.includes('已确认日常 Edge') || text.includes('日常 Edge 会话已连接')) return 92;
         if (text.includes('会话已连接') || text.includes('验证完成，正在加载')) return 96;
         if (text.includes('正在打开 VS Code 集成浏览器')) return 98;
         if (text.includes('集成浏览器已打开') || text.includes('已经连接并验证通过')) return 100;
@@ -343,7 +350,7 @@ export class CfPanel {
       function openLogin() {
         if (loginPending || sessionReady) return;
         loginProgressValue = 0;
-        updateLoginProgress('正在打开 Edge 登录页面；登录完成后请勿关闭 Edge…');
+        updateLoginProgress('正在连接 Edge；登录或验证完成前请勿关闭相关标签页…');
         vscodeApi.postMessage({ type: 'openLogin' });
       }
 
@@ -427,6 +434,7 @@ export class CfPanel {
       });
       document.getElementById('login').addEventListener('click', openLogin);
       document.getElementById('gateLogin').addEventListener('click', openLogin);
+      document.getElementById('gateInstall').addEventListener('click', function(){ vscodeApi.postMessage({ type: 'installEdgeExtension' }); });
       loadingRetry.addEventListener('click', function () {
         navigate(urlInput.value || defaultPath);
       });

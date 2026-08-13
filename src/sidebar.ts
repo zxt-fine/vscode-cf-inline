@@ -108,7 +108,6 @@ export class CfSidebarProvider implements vscode.TreeDataProvider<CfSidebarItem>
 
     const secondaryActions = connected
       ? [
-          this.action('个人刷题仪表盘', 'graph', '收藏、进度、Rating、标签和错误统计', 'cfInline.openDashboard'),
           this.action('配置 AI 增强翻译', 'sparkle', '可选：Ollama 或 OpenAI 兼容模型', 'cfInline.configureAiTranslation'),
           this.action('测试 AI 翻译连接', 'beaker', '验证当前接口和模型', 'cfInline.testAiTranslation'),
           this.action('重新验证 Codeforces 账号', 'account', '仅在连接异常时使用', 'cfInline.openLogin'),

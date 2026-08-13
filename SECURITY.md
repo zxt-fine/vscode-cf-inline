@@ -10,7 +10,7 @@
 
 - Codeforces Cookie、账号或密码
 - CSRF Token 或翻译服务 Token
-- 专用 Edge 配置目录
+- 配套 Edge 扩展导出的 Codeforces Cookie 或桥接通信内容
 - 包含个人路径、代理凭据或浏览历史的完整日志
 
 优先使用 GitHub 仓库 Security 页面提供的私密漏洞报告功能。如果该功能暂不可用，请创建一个不包含敏感细节的 Issue，请求维护者建立私密沟通渠道。

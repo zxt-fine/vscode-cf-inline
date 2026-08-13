@@ -248,10 +248,11 @@ export async function captureCodeforcesSession(
           // successful login, so a challenged homepage must not keep the whole
           // login notification alive forever. The transport and each requested
           // page report their own availability separately.
-          let pageStillChallenged = await transport.hasVisibleCloudflareChallenge();
-          const visibleAccountState = pageStillChallenged
-            ? 'challenged'
-            : await transport.inspectVisibleLoginState(2_500);
+          // Inspect the rendered account controls as one atomic snapshot. A
+          // separate challenge probe followed by a second DOM read can race
+          // with navigation and misclassify an already signed-in profile page.
+          const visibleAccountState = await transport.inspectVisibleLoginState(2_500);
+          let pageStillChallenged = visibleAccountState === 'challenged';
           let accountConfirmed = visibleAccountState === 'authenticated';
           if (visibleAccountState === 'anonymous') {
             options.onStatus?.('检测到旧登录信息，但官网仍显示登录页面；请在 Edge 中完成登录。');
@@ -677,7 +678,8 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
         };
         const page = evaluated.result?.value;
         if (
-          page?.readyState === 'complete'
+          page
+          && page.readyState !== 'loading'
           && page.url
           && page.html
           && isCodeforcesUrl(page.url)
@@ -749,14 +751,19 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
         };
         const page = evaluated.result?.value;
         if (page?.url && page.html && isCodeforcesUrl(page.url)) {
-          if (isCloudflareChallenge(page.html, 200)) {
-            return 'challenged';
-          }
+          // Explicit account controls beat broad challenge signatures because
+          // normal Codeforces documents can retain Cloudflare script markup.
           lastState = detectCodeforcesAuthentication(page.html, page.url);
           if (lastState === 'anonymous') {
             return lastState;
           }
-          if (lastState === 'authenticated' && page.readyState === 'complete') {
+          if (lastState !== 'authenticated' && isCloudflareChallenge(page.html, 200)) {
+            return 'challenged';
+          }
+          // Slow images or third-party resources can keep window.load pending.
+          // The rendered account and logout controls are conclusive as soon as
+          // the DOM is interactive.
+          if (lastState === 'authenticated' && page.readyState !== 'loading') {
             if (authenticatedUrl === page.url) {
               consecutiveAuthenticated += 1;
             } else {
@@ -1498,6 +1505,7 @@ export function detectCodeforcesAuthentication(
   const hasEnterForm = /id\s*=\s*["']enterForm["']/i.test(html);
   const hasLogoutLink = /href\s*=\s*["'][^"']*\/logout(?:\?[^"']*)?["']/i.test(html);
   const hasProfileLink = /href\s*=\s*["'][^"']*\/profile\/[^"'/?#]+(?:[?#][^"']*)?["']/i.test(html);
+  const isAccountProfilePage = /^\/profile\/[^/?#]+\/?$/i.test(pathname);
   const hasAnonymousNavigation =
     /href\s*=\s*["'][^"']*\/enter(?:\?[^"']*)?["']/i.test(html) &&
     /href\s*=\s*["'][^"']*\/register(?:\?[^"']*)?["']/i.test(html);
@@ -1505,7 +1513,9 @@ export function detectCodeforcesAuthentication(
   if (/^\/enter(?:\/|$)/i.test(pathname) || hasEnterForm || hasAnonymousNavigation) {
     return 'anonymous';
   }
-  if (hasLogoutLink && hasProfileLink) {
+  // On a user's own profile the handle can be plain text instead of another
+  // profile link. Logout plus that account URL is still explicit proof.
+  if (hasLogoutLink && (hasProfileLink || isAccountProfilePage)) {
     return 'authenticated';
   }
   return 'unknown';

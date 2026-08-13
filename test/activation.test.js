@@ -6,11 +6,11 @@ const test = require('node:test');
 test('does not launch Edge while VS Code is merely activating the extension', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
   assert.doesNotMatch(source, /restoreSavedBrowserSession/);
-  const loginCalls = [...source.matchAll(/loginWithOfficialBrowser\(/g)];
+  const loginCalls = [...source.matchAll(/loginWithEdgeBridge\(/g)];
   assert.equal(loginCalls.length, 1);
   assert.ok(loginCalls[0].index > source.indexOf('const handleReloginRequest'));
   assert.match(source, /proxy\.on\('reloginRequest', handleReloginRequest\)/);
-  assert.match(source, /Do not start Edge during VS Code activation/);
+  assert.match(source, /Do not open Edge during VS Code activation/);
 });
 
 test('relies on VS Code generated activation events for contributed commands', () => {
@@ -21,6 +21,7 @@ test('relies on VS Code generated activation events for contributed commands', (
     'cfInline.openIntegratedBrowser',
     'cfInline.openPanel',
     'cfInline.openLogin',
+    'cfInline.installEdgeExtension',
     'cfInline.openDashboard',
     'cfInline.configureAiTranslation',
     'cfInline.selectTranslationMode',
@@ -45,8 +46,9 @@ test('registers a native Codeforces activity-bar sidebar without launching Edge'
   assert.match(sidebarSource, /executeCommand\('cfInline\.open'\)/);
   assert.match(sidebarSource, /'打开 Codeforces 浏览器'/);
   assert.match(sidebarSource, /'重新连接 Edge'/);
+  assert.doesNotMatch(sidebarSource, /'安装配套 Edge 扩展'/);
   assert.match(sidebarSource, /'配置 AI 增强翻译'/);
-  assert.match(sidebarSource, /'个人刷题仪表盘'/);
+  assert.doesNotMatch(sidebarSource, /'个人刷题仪表盘'/);
   assert.match(sidebarSource, /'翻译模式'/);
   assert.match(sidebarSource, /'cfInline\.selectTranslationMode'/);
   assert.match(sidebarSource, /普通免费翻译（DeepL 优先）/);
@@ -117,6 +119,6 @@ test('keeps AI enhancement optional and stores its key only in VS Code SecretSto
 test('shows the login panel first and leaves Edge launch to its button', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
   assert.match(source, /The first visible step is always the extension login page/);
-  assert.match(source, /CfPanel\.createOrShow\(context, proxy!\)/);
+  assert.match(source, /CfPanel\.createOrShow\(context, proxy!, edgeBridge\)/);
   assert.doesNotMatch(source, /registerCommand\('cfInline\.openLogin',[\s\S]{0,200}loginWithOfficialBrowser/);
 });

@@ -2,7 +2,7 @@
   "name": "vscode-cf-inline",
   "displayName": "Codeforces Inline",
   "description": "在 VS Code 集成浏览器中保留 Codeforces 原文并生成独立中文译文。",
-  "version": "0.10.32",
+  "version": "0.11.9",
   "publisher": "codex-local",
   "author": "zxt-fine",
   "license": "MIT",
@@ -45,6 +45,10 @@
       {
         "command": "cfInline.openLogin",
         "title": "Codeforces Inline: 登录并连接 Edge 会话"
+      },
+      {
+        "command": "cfInline.installEdgeExtension",
+        "title": "Codeforces Inline: 安装配套 Edge 扩展"
       },
       {
         "command": "cfInline.openDashboard",

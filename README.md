@@ -1,7 +1,7 @@
 # Codeforces Inline
 
 [![CI](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml/badge.svg)](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.10.32-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
+[![Version](https://img.shields.io/badge/version-0.11.9-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 一个面向中文竞赛编程用户的 VS Code 扩展：在 VS Code 集成浏览器中浏览 Codeforces，保留英文或俄文原题，在原文下方生成独立中文译文，并支持登录、群组、提交和评测结果跟踪。
@@ -13,10 +13,9 @@
 ### 浏览与登录
 
 - 在 VS Code 活动栏提供独立 Codeforces 图标，可直接展开连接状态、打开、登录和提交入口。
-- 使用 Microsoft Edge 的独立受控配置登录 Codeforces 官方网站，兼容 Cloudflare 验证和真实账号会话。
-- 插件启动时不会自动打开 Edge；只有用户主动点击登录或打开插件时才检查会话。
-- 登录窗口以普通的 `1200 × 800` 窗口打开，登录并验证成功后自动最小化。
-- 专用 Edge 配置会保留登录 Cookie；下次打开时优先静默恢复，失效后才要求重新登录。
+- 通过随插件提供的 Manifest V3 配套扩展复用日常 Microsoft Edge 的 Codeforces 登录、Cookie、VPN、密码及已有扩展。
+- 配套扩展只需首次手动加载一次；插件启动时不会主动打开 Edge，日常 Edge 已运行时会自动恢复连接。
+- 只有未登录、Cloudflare 验证或代码提交需要真实页面时才显示 Edge 标签页。
 - 提供默认的“极速模式”和可切换的“正常模式”，切换和页面导航均显示加载进度。
 - 极速模式仅保留比赛、题库、我的群组和训练营四个核心入口。
 
@@ -46,7 +45,7 @@
 - 每道题目的中文译文下方提供独立提交框，可粘贴代码或读取本地文件。
 - 支持普通比赛、Gym、题库和私有群组题目。
 - 自动读取 Codeforces 当前可用语言，并按文件扩展名或用户偏好选择默认语言。
-- 提交由真实 Edge 官方页面生成实时校验字段；若 Codeforces 临时要求额外验证，会打开普通大小的 Edge 验证页，完成后可直接重试。
+- 提交由日常 Edge 的真实 Codeforces 页面填写并触发官方表单；若临时要求额外验证，可在当前标签页完成后重试。
 - 提交后持续刷新提交记录，在页面内显示排队、评测中、Accepted、Wrong Answer 等状态。
 
 ## 系统要求
@@ -57,7 +56,7 @@
 - Node.js 24 或更高版本（仅源码开发和自行打包需要）
 - 能够访问 Codeforces 的网络环境；如所在网络无法直连，需要可用的系统代理或 VPN
 
-当前版本依赖 Windows 上的 Microsoft Edge 和专用浏览器配置，尚未正式支持 macOS 或 Linux。
+当前版本依赖 Microsoft Edge 和配套桥接扩展；主要在 Windows 上验证，尚未正式支持 macOS 或 Linux。
 
 ## 安装
 
@@ -84,12 +83,12 @@ npm run package
 
 1. 打开命令面板（`Ctrl + Shift + P`）。
 2. 执行 `Codeforces Inline: 打开 Codeforces 翻译浏览器`。
-3. 首次使用时，插件先在 VS Code 中显示连接页面；点击登录按钮后才会打开专用 Edge。
-4. 在 Edge 中完成人机验证和账号登录。登录过程中不要关闭该窗口。
-5. 插件验证比赛、题库、我的群组和训练营后，会自动最小化 Edge 并在 VS Code 中打开极速模式。
-6. 打开题目后阅读英文原题及下方中文译文，并使用题目下方提交框或原生提交页提交代码。
+3. 首次使用点击“安装配套扩展”；在 `edge://extensions` 开启开发人员模式，选择“加载解压缩的扩展”，加载插件打开的文件夹。
+4. 返回 VS Code 点击“连接日常 Edge”。若日常 Edge 尚未登录 Codeforces，请在打开的标签页完成验证和登录。
+5. 连接成功后 VS Code 自动打开极速模式。以后只要配套扩展启用且日常 Edge 正在运行，通常无需重复登录。
+6. 打开题目后阅读原题及下方中文译文，并使用题目下方提交框或原生提交页提交代码。
 
-关闭后台专用 Edge 后，当前会话会断开。此时刷新页面会显示错误和“重新登录”按钮，可以重新建立会话。
+关闭日常 Edge 或禁用配套扩展后，当前会话会断开；重新启动 Edge 后配套扩展会自动连接，必要时也可点击“连接日常 Edge”。
 
 ## 命令
 
@@ -99,6 +98,7 @@ npm run package
 | `Codeforces Inline: 在 VS Code 集成浏览器中打开` | 直接使用 VS Code 集成浏览器显示页面 |
 | `Codeforces Inline: 打开旧版内嵌面板` | 使用旧版 iframe 内嵌界面 |
 | `Codeforces Inline: 登录并连接 Edge 会话` | 打开登录连接页面 |
+| `Codeforces Inline: 安装配套 Edge 扩展` | 打开扩展文件夹并复制路径，供 Edge 首次加载 |
 | `Codeforces Inline: 打开个人刷题仪表盘` | 查看收藏、进度、备注和 Codeforces 刷题统计 |
 | `Codeforces Inline: 配置 AI 增强翻译` | 选择 DeepSeek、OpenAI、Ollama 或自定义兼容接口 |
 | `Codeforces Inline: 更新并验证 AI API Key` | 验证新的 API Key，通过后再存入 VS Code 加密密钥存储 |
@@ -151,18 +151,18 @@ VS Code 集成浏览器
         ↓
 本地同源页面服务（链接改写、中文化、翻译与提交辅助）
         ↓
-专用 Microsoft Edge 会话（登录、Cloudflare、Codeforces 网络请求）
+日常 Microsoft Edge + 配套扩展（登录、Cloudflare、Codeforces 网络请求和提交）
         ↓
 Codeforces
 ```
 
-本地服务仅监听 `127.0.0.1`。需要登录的 Codeforces 请求通过用户已经验证的 Edge 会话完成，避免把 Node.js 请求识别成另一个客户端。
+本地服务仅监听 `127.0.0.1`。需要登录的 Codeforces 请求通过日常 Edge 真实页面完成，避免把 Node.js 请求识别成另一个客户端。
 
 ## 隐私与安全
 
 - 项目不会把 Codeforces 账号或密码保存到仓库、普通配置文件或日志中。
-- 登录状态保存在 VS Code 扩展数据目录下的专用 Edge 配置中，并由 Windows/Edge 管理。
-- 插件只导入建立会话所需的 Codeforces Cookie，不读取日常 Edge 配置或其他网站数据。
+- 登录状态由日常 Edge 自身管理；VS Code 插件不保存账号或密码。
+- 配套扩展权限只允许 Codeforces 和本机桥接地址；只导入建立本次会话所需的 Codeforces Cookie，不读取其他网站数据。
 - 题面普通翻译会把需要翻译的文本片段发送到 Bing 或 Google；公式、代码、图片和样例不会发送。仅当用户主动开启 AI 增强翻译时，英文片段和中文初稿才会发送到用户配置的 AI 服务。
 - 本地接口限制为回环地址，并对翻译、重新登录和页面状态接口进行来源或请求头校验。
 - 不要提交包含真实 Cookie、CSRF Token、账号密码、个人 Edge 配置或本机日志的 Issue。
@@ -173,11 +173,11 @@ Codeforces
 
 ### 插件一打开就提示 Edge 会话已断开
 
-点击页面中的“重新登录”，在新打开的专用 Edge 中完成登录，并保持它在后台运行。
+确认配套 Edge 扩展已启用并点击“连接日常 Edge”；如有验证页，在日常 Edge 中完成后重试。
 
 ### 页面一直加载或 Codeforces 超时
 
-确认日常 Edge 能在相同网络下访问 Codeforces，并检查 Windows 系统代理或 VPN。插件会继承 Edge 使用的系统网络设置，但不会加载日常 Edge 扩展。
+确认日常 Edge 能访问 Codeforces，并检查系统代理或 VPN。桥接模式直接使用日常 Edge，因此会复用其网络环境和已有扩展。
 
 ### 修改插件后界面没有变化
 
@@ -217,7 +217,7 @@ out/        本地编译产物（不提交 Git）
 
 ## 已知限制与计划
 
-- 受控 Edge 转发需要完整读取并传回页面资源，因此首次加载可能比日常 Edge 慢。
+- 日常 Edge 仍需把页面资源传回 VS Code，首次加载会有少量桥接开销；极速模式缓存可减少后续等待。
 - Codeforces 页面结构变化可能影响中文化、样例提取或提交辅助。
 - 在线翻译依赖第三方翻译服务及当前网络。
 - 计划支持 CPH 样例导入与运行，并研究公开资源的流式混合加速。

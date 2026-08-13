@@ -12,7 +12,7 @@ import {
   normalizeAiProfiles,
   upsertAiProfile,
 } from './ai-profiles';
-import { loginWithOfficialBrowser } from './browser-login';
+import { EdgeBridgeServer, loginWithEdgeBridge, restoreEdgeBridgeSession, revealEdgeExtension } from './edge-bridge';
 import { prefersIntegratedBrowser, openInIntegratedBrowser } from './integrated-browser';
 import { CfPanel } from './panel';
 import { CfProxy } from './proxy';
@@ -307,6 +307,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   });
   await proxy.start();
+  const edgeBridge = new EdgeBridgeServer();
+  await edgeBridge.start();
+  context.subscriptions.push(edgeBridge);
 
   // Versions before 0.2 stored only cookies and then incorrectly presented
   // them as a reusable Cloudflare session. Remove that stale marker once;
@@ -315,8 +318,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const handleReloginRequest = (): void => {
     const activeProxy = proxy!;
-    activeProxy.setLoginProgress(true, '正在打开 Edge 登录页面…');
-    void loginWithOfficialBrowser(context, activeProxy, (message) => {
+    activeProxy.setLoginProgress(true, '正在连接 Edge 会话…');
+    void loginWithEdgeBridge(edgeBridge, activeProxy, (message) => {
       activeProxy.setLoginProgress(true, message);
     }).then(
       () => {
@@ -334,6 +337,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   proxy.on('reloginRequest', handleReloginRequest);
   proxy.on('translationModeRequest', handleTranslationModeRequest);
+  edgeBridge.on('disconnect', () => proxy?.notifyTransportClosed());
+  edgeBridge.on('connect', () => {
+    if (!proxy?.isSessionReady()) void restoreEdgeBridgeSession(edgeBridge, proxy!);
+  });
+  edgeBridge.on('session', () => {
+    if (!proxy?.isSessionReady() && edgeBridge.sessionSnapshot) void restoreEdgeBridgeSession(edgeBridge, proxy!);
+  });
+  edgeBridge.on('incompatible', (message: string) => {
+    proxy?.setLoginProgress(false, message);
+    void vscode.window.showErrorMessage(message);
+  });
 
   context.subscriptions.push(
     vscode.commands.registerCommand('cfInline.open', async () => {
@@ -349,12 +363,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       // The first visible step is always the extension login page. Edge is
       // launched only after the user presses its login button.
-      CfPanel.createOrShow(context, proxy!);
+      CfPanel.createOrShow(context, proxy!, edgeBridge);
     }),
     vscode.commands.registerCommand('cfInline.openIntegratedBrowser', async () => {
       try {
         if (!proxy!.isLoggedIn() || !proxy!.isSessionReady()) {
-          CfPanel.createOrShow(context, proxy!);
+          CfPanel.createOrShow(context, proxy!, edgeBridge);
           return;
         }
         await openInIntegratedBrowser(proxy!);
@@ -363,11 +377,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.commands.registerCommand('cfInline.openPanel', () => {
-      CfPanel.createOrShow(context, proxy!);
+      CfPanel.createOrShow(context, proxy!, edgeBridge);
     }),
     vscode.commands.registerCommand('cfInline.openLogin', () => {
-      CfPanel.createOrShow(context, proxy!);
+      CfPanel.createOrShow(context, proxy!, edgeBridge);
     }),
+    vscode.commands.registerCommand('cfInline.installEdgeExtension', () => revealEdgeExtension(context)),
     vscode.commands.registerCommand('cfInline.openDashboard', async () => {
       await vscode.commands.executeCommand('simpleBrowser.show', `${proxy!.origin}/__cf_inline/dashboard`);
     }),
@@ -540,8 +555,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // so the very first click after installation can open the editor page.
   context.subscriptions.push(...registerCfSidebar(proxy));
 
-  // Do not start Edge during VS Code activation. A saved session is checked only
-  // after the user explicitly opens this extension or requests an authenticated action.
+  // Do not open Edge during VS Code activation. The lightweight bridge may
+  // reconnect itself, but visible login pages require an explicit user action.
 }
 
 export function deactivate(): void {
