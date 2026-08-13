@@ -1,10 +1,10 @@
 # Codeforces Inline
 
 [![CI](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml/badge.svg)](https://github.com/zxt-fine/vscode-cf-inline/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.9.36-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
+[![Version](https://img.shields.io/badge/version-0.10.32-blue.svg)](https://github.com/zxt-fine/vscode-cf-inline)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-一个面向中文竞赛编程用户的 VS Code 扩展：在 VS Code 集成浏览器中浏览 Codeforces，保留英文原题，在原文下方生成独立中文译文，并支持登录、群组、提交和评测结果跟踪。
+一个面向中文竞赛编程用户的 VS Code 扩展：在 VS Code 集成浏览器中浏览 Codeforces，保留英文或俄文原题，在原文下方生成独立中文译文，并支持登录、群组、提交和评测结果跟踪。
 
 > 本项目是非官方开源项目，与 Codeforces 官方无隶属或合作关系。使用时请遵守 Codeforces 的服务条款和比赛规则。
 
@@ -36,6 +36,9 @@
 - 比赛倒计时使用实时兜底计时器，即使官方脚本加载失败也会每秒更新。
 - 刷新或恢复 VS Code 标签页时尽量保留当前比赛、群组和题目路径。
 - 静态资源、题目文档和常用页面采用分层缓存；带实时倒计时的页面不会使用旧文档快照。
+- 题目标题旁提供醒目的“收藏题目”按钮；每道题还可标记为“待做、正在做、需要复习、已掌握”，同时保存个人思路、易错点和复习备注。
+- 个人刷题仪表盘使用 Codeforces 个人主页的官方全部时间做题量；每日 AC、Rating 分布、标签覆盖、WA 次数和薄弱知识点则基于可获取的公开提交明细，并明确标注统计口径。
+- 仪表盘支持删除不再需要的本地题目标记，算法标签显示中文；Rating 分布包含未定级题目，各档合计与提交明细中的已解决题数一致。
 
 ### 提交代码
 
@@ -96,6 +99,7 @@ npm run package
 | `Codeforces Inline: 在 VS Code 集成浏览器中打开` | 直接使用 VS Code 集成浏览器显示页面 |
 | `Codeforces Inline: 打开旧版内嵌面板` | 使用旧版 iframe 内嵌界面 |
 | `Codeforces Inline: 登录并连接 Edge 会话` | 打开登录连接页面 |
+| `Codeforces Inline: 打开个人刷题仪表盘` | 查看收藏、进度、备注和 Codeforces 刷题统计 |
 | `Codeforces Inline: 配置 AI 增强翻译` | 选择 DeepSeek、OpenAI、Ollama 或自定义兼容接口 |
 | `Codeforces Inline: 更新并验证 AI API Key` | 验证新的 API Key，通过后再存入 VS Code 加密密钥存储 |
 | `Codeforces Inline: 测试 AI 增强翻译连接` | 测试当前接口、模型和密钥是否可用 |

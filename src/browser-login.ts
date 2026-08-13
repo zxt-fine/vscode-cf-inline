@@ -12,6 +12,7 @@ import {
   translateHtmlItems,
   TranslationHttpRequest,
   UI_TRANSLATIONS,
+  UI_PREFIX_TRANSLATIONS,
 } from './localization';
 import { request as directHttpRequest } from './net';
 import {
@@ -62,11 +63,12 @@ export interface CaptureOptions {
   timeoutMs?: number;
 }
 
-const MY_GROUPS_PATH = '/groups/my';
-// Open the destination directly. Codeforces redirects anonymous users to its
-// official login page, while a remembered account can immediately reuse the
-// authenticated page without racing an unnecessary /enter redirect.
-const LOGIN_URL = `https://codeforces.com${MY_GROUPS_PATH}`;
+const SESSION_CHECK_PATH = '/';
+// Verify the account on the lightweight homepage. Requiring /groups/my here
+// made a path-specific Cloudflare challenge block the entire extension even
+// when Codeforces had already confirmed the signed-in account. Feature pages
+// are loaded only when the user actually opens them.
+const LOGIN_URL = 'https://codeforces.com/enter?back=%2F&mobile=false';
 let activeLogin: Promise<void> | undefined;
 let activeRestore: Promise<boolean> | undefined;
 let activeLoginStatus: string | undefined;
@@ -161,6 +163,7 @@ export async function captureCodeforcesSession(
   const port = await reservePort();
   let browserProcess: ChildProcess | undefined;
   let browserClient: CdpClient | undefined;
+  let loginTargetId: string | undefined;
   let keepBrowserAlive = false;
 
   try {
@@ -186,6 +189,7 @@ export async function captureCodeforcesSession(
       let appearanceClient: CdpClient | undefined;
       try {
         const appearanceTarget = await waitForCodeforcesPageTarget(port);
+        loginTargetId = appearanceTarget.id;
         appearanceClient = await CdpClient.connect(appearanceTarget.webSocketDebuggerUrl!);
         await installControlledEdgeAppearance(appearanceClient);
       } catch {
@@ -222,10 +226,12 @@ export async function captureCodeforcesSession(
       }
       if (hasLoggedInCookie(codeforcesCookies) && Date.now() >= nextVerificationAt) {
         nextVerificationAt = Date.now() + 3000;
-        options.onStatus?.('已检测到账号，正在逐项验证 Edge 会话…');
+        options.onStatus?.('已检测到账号，正在建立 Edge 会话…');
         let transport: EdgeBrowserTransport | undefined;
         try {
-          const target = await waitForCodeforcesPageTarget(port);
+          const target = loginTargetId
+            ? await waitForDevToolsTarget(port, loginTargetId)
+            : await waitForCodeforcesPageTarget(port);
           const pageClient = await CdpClient.connect(target.webSocketDebuggerUrl!);
           await installControlledEdgeAppearance(pageClient);
           transport = new EdgeBrowserTransport(
@@ -237,8 +243,48 @@ export async function captureCodeforcesSession(
             port,
             temporaryProfile
           );
-          await transport.verifySession((message) => options.onStatus?.(message));
-          options.onStatus?.('账号验证完成，正在最小化 Edge 并建立安全会话…');
+          // A valid X-User-Sha1 cookie is Codeforces' durable account marker.
+          // Cloudflare may challenge every document independently even after a
+          // successful login, so a challenged homepage must not keep the whole
+          // login notification alive forever. The transport and each requested
+          // page report their own availability separately.
+          let pageStillChallenged = await transport.hasVisibleCloudflareChallenge();
+          const visibleAccountState = pageStillChallenged
+            ? 'challenged'
+            : await transport.inspectVisibleLoginState(2_500);
+          let accountConfirmed = visibleAccountState === 'authenticated';
+          if (visibleAccountState === 'anonymous') {
+            options.onStatus?.('检测到旧登录信息，但官网仍显示登录页面；请在 Edge 中完成登录。');
+            transport.closePageClient();
+            transport = undefined;
+            await delay(1_000);
+            continue;
+          }
+          if (!accountConfirmed) {
+            try {
+              await transport.verifySession(options.onStatus);
+              accountConfirmed = true;
+              pageStillChallenged = false;
+            } catch (err) {
+              pageStillChallenged = await transport.hasVisibleCloudflareChallenge();
+              options.onStatus?.(
+                pageStillChallenged
+                  ? 'Edge 正在进行人机验证；尚未确认账号登录，请完成验证和登录，且不要关闭 Edge。'
+                  : `检测到旧登录信息，但尚未确认账号已登录：${errorMessage(err)}。请在 Edge 中完成登录。`
+              );
+              transport.closePageClient();
+              transport = undefined;
+              await delay(1_000);
+              continue;
+            }
+          }
+          if (!accountConfirmed) {
+            transport.closePageClient();
+            transport = undefined;
+            await delay(1_000);
+            continue;
+          }
+          options.onStatus?.('账号登录已确认；正在连接并最小化 Edge…');
           await transport.minimizeWindow();
           keepBrowserAlive = true;
           return {
@@ -249,7 +295,7 @@ export async function captureCodeforcesSession(
         } catch (err) {
           transport?.closePageClient();
           options.onStatus?.(
-            `登录已检测到，但 Edge 会话尚未通过验证：${errorMessage(err)}。请保留此窗口，插件会继续重试。`
+            `账号已登录，但 Edge 连接尚未就绪：${errorMessage(err)}。请保留此窗口，插件会继续重试。`
           );
         }
       }
@@ -573,14 +619,31 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
   }
 
   isAlive(): boolean {
-    return !this.disposed && this.browserClient.isOpen() && this.pageClient.isOpen();
+    // Codeforces navigation and temporary submission cleanup can briefly
+    // replace the page target. Keep the authenticated session alive while the
+    // Edge process and browser-level CDP connection are still alive; request()
+    // reconnects the page target when needed.
+    return !this.disposed && this.browserProcess.exitCode === null && this.browserClient.isOpen();
+  }
+
+  async hasValidLoginCookie(): Promise<boolean> {
+    if (!this.isAlive()) {
+      return false;
+    }
+    const result = (await this.browserClient.send('Storage.getCookies', undefined, 5_000)) as CookieResult;
+    return hasLoggedInCookie(result.cookies.filter(isCodeforcesCookie));
   }
 
   async verifySession(onStatus?: (message: string) => void): Promise<void> {
     await this.waitForCodeforcesDocument();
-    onStatus?.('正在确认账号和“我的群组”入口…');
-    const requestUrl = new URL(MY_GROUPS_PATH, 'https://codeforces.com').toString();
-    const visibleDocument = await this.waitForVisibleAuthenticatedGroupsDocument(8_000);
+    onStatus?.('正在确认 Codeforces 账号登录状态…');
+    const requestUrl = new URL(SESSION_CHECK_PATH, 'https://codeforces.com').toString();
+    let visibleDocument = await this.waitForVisibleAuthenticatedDocument(1_500);
+    if (!visibleDocument) {
+      onStatus?.('当前入口仍在验证，正在切换到 Codeforces 主页确认账号…');
+      await this.pageClient.send('Page.navigate', { url: requestUrl }, 30_000);
+      visibleDocument = await this.waitForVisibleAuthenticatedDocument(10_000);
+    }
     const response = visibleDocument ?? await this.requestOnce({
       url: requestUrl,
       method: 'GET',
@@ -588,16 +651,15 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
       body: Buffer.alloc(0),
       timeoutMs: 20_000,
     });
-    assertUsableCodeforcesPage(response, '我的群组');
-    assertAuthenticatedCodeforcesPage(response, '我的群组');
-    if (!isPersonalGroupsUrl(response.finalUrl)) {
-      throw new Error('“我的群组”被重定向到全部群组，尚未确认个人群组页面');
+    assertUsableCodeforcesPage(response, 'Codeforces 主页');
+    assertAuthenticatedCodeforcesPage(response, 'Codeforces 主页');
+    if (new URL(response.finalUrl).pathname.replace(/\/+$/, '') === '') {
+      this.prefetchedDocuments.set(requestUrl, { response, expiresAt: Date.now() + 45_000 });
     }
-    this.prefetchedDocuments.set(requestUrl, { response, expiresAt: Date.now() + 45_000 });
-    onStatus?.('账号验证完成；其他入口将在需要时加载，避免触发额外验证。');
+    onStatus?.('账号验证完成；群组、比赛、题库等入口将在打开时按需加载。');
   }
 
-  private async waitForVisibleAuthenticatedGroupsDocument(
+  private async waitForVisibleAuthenticatedDocument(
     timeoutMs: number
   ): Promise<CfTransportResponse | undefined> {
     const deadline = Date.now() + timeoutMs;
@@ -618,7 +680,7 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
           page?.readyState === 'complete'
           && page.url
           && page.html
-          && isPersonalGroupsUrl(page.url)
+          && isCodeforcesUrl(page.url)
           && detectCodeforcesAuthentication(page.html, page.url) === 'authenticated'
         ) {
           return {
@@ -650,11 +712,82 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
     }
   }
 
+  async hasVisibleCloudflareChallenge(): Promise<boolean> {
+    try {
+      const evaluated = (await this.pageClient.send('Runtime.evaluate', {
+        expression: `(() => {
+          const text = String(document.body && document.body.innerText || '').slice(0, 12000);
+          return /Just a moment|Checking your browser|请稍候/i.test(document.title)
+            || /cf-chl-|challenge-platform|complete the anti-bot verification/i.test(text);
+        })()`,
+        returnByValue: true,
+      }, 5_000)) as { result?: { value?: boolean } };
+      return evaluated.result?.value === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async inspectVisibleLoginState(
+    timeoutMs: number
+  ): Promise<CodeforcesAuthenticationState | 'challenged'> {
+    const deadline = Date.now() + timeoutMs;
+    let lastState: CodeforcesAuthenticationState = 'unknown';
+    let authenticatedUrl = '';
+    let consecutiveAuthenticated = 0;
+    while (Date.now() < deadline) {
+      try {
+        const evaluated = (await this.pageClient.send('Runtime.evaluate', {
+          expression: `({
+            url: location.href,
+            readyState: document.readyState,
+            html: document.documentElement ? document.documentElement.outerHTML : ''
+          })`,
+          returnByValue: true,
+        }, 5_000)) as {
+          result?: { value?: { url?: string; readyState?: string; html?: string } };
+        };
+        const page = evaluated.result?.value;
+        if (page?.url && page.html && isCodeforcesUrl(page.url)) {
+          if (isCloudflareChallenge(page.html, 200)) {
+            return 'challenged';
+          }
+          lastState = detectCodeforcesAuthentication(page.html, page.url);
+          if (lastState === 'anonymous') {
+            return lastState;
+          }
+          if (lastState === 'authenticated' && page.readyState === 'complete') {
+            if (authenticatedUrl === page.url) {
+              consecutiveAuthenticated += 1;
+            } else {
+              authenticatedUrl = page.url;
+              consecutiveAuthenticated = 1;
+            }
+            if (consecutiveAuthenticated >= 2) {
+              return lastState;
+            }
+          } else {
+            authenticatedUrl = '';
+            consecutiveAuthenticated = 0;
+          }
+          if (page.readyState === 'complete') {
+            await delay(250);
+          }
+        }
+      } catch (err) {
+        if (!isTransientExecutionContextError(err)) throw err;
+      }
+      await delay(250);
+    }
+    return lastState;
+  }
+
   async request(request: CfTransportRequest): Promise<CfTransportResponse> {
     if (this.disposed) {
       throw new Error('Edge 浏览器会话已关闭');
     }
     const url = new URL(request.url);
+    forceDesktopCodeforcesUrl(url);
     if (!isCodeforcesHost(url.hostname)) {
       throw new Error(`拒绝通过登录会话访问非 Codeforces 地址：${url.hostname}`);
     }
@@ -841,7 +974,8 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
 
   private async revealSubmissionVerification(url: string): Promise<void> {
     try {
-      await this.pageClient.send('Page.navigate', { url }, 30_000);
+      const target = new URL(url);forceDesktopCodeforcesUrl(target);
+      await this.pageClient.send('Page.navigate', { url: target.toString() }, 30_000);
       const windowInfo = (await this.browserClient.send('Browser.getWindowForTarget', {
         targetId: this.targetId,
       })) as { windowId: number };
@@ -1026,6 +1160,12 @@ class EdgeBrowserTransport implements CfUpstreamTransport {
   }
 }
 
+function forceDesktopCodeforcesUrl(url: URL): void {
+  if (/^(?:m[1-3]\.)?codeforces\.com$/i.test(url.hostname) && !url.searchParams.has('mobile')) {
+    url.searchParams.set('mobile', 'false');
+  }
+}
+
 function browserFetchCacheMode(
   url: URL,
   method: string,
@@ -1051,9 +1191,9 @@ export function buildControlledEdgeAppearanceScript(): string {
     'Соревнования': '比赛',
     'Тренировки': '训练营',
     'Архив': '题库',
-    'Группы': '团体',
+    'Группы': '群组',
     'Рейтинг': '排行榜',
-    'Образование': '培训',
+    'Образование': '教程',
     'Календарь': '日历',
     'Помощь': '帮助',
     'Выйти': '退出登录',
@@ -1063,7 +1203,7 @@ export function buildControlledEdgeAppearanceScript(): string {
     'Результаты': '结果',
     'Войти': '进入',
     'Виртуальное участие': '虚拟参赛',
-    'Подготовил': '创建者',
+    'Подготовил': '出题人',
     'Условия': '说明',
     'Фильтр тренировок': '训练营筛选',
     'Сезон': '赛季',
@@ -1084,12 +1224,14 @@ export function buildControlledEdgeAppearanceScript(): string {
     }
   }
   const translations = JSON.stringify(controlledTranslations).replace(/</g, '\\u003c');
+  const prefixTranslations = JSON.stringify(UI_PREFIX_TRANSLATIONS).replace(/</g, '\\u003c');
   const pageZoom = buildPageZoomClientScript();
   const controlledDesktopStyle = JSON.stringify(CONTROLLED_CODEFORCES_DESKTOP_CSS);
   return `(function(){
     if(!/(^|\\.)codeforces\\.com$/i.test(location.hostname))return;
     ${pageZoom};
     var dictionary=${translations};
+    var prefixDictionary=${prefixTranslations};
     function switchRussianPageToEnglish(){
       var bodyText=(document.body&&document.body.innerText)||'';
       if(!/(?:ГЛАВНАЯ|СОРЕВНОВАНИЯ|ТРЕНИРОВКИ|Выйти)/i.test(bodyText))return false;
@@ -1112,7 +1254,9 @@ export function buildControlledEdgeAppearanceScript(): string {
       var nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);
       nodes.forEach(function(node){
         var parent=node.parentElement;if(!parent||parent.closest('script,style,noscript,pre,code,textarea,[contenteditable="true"]'))return;
-        var raw=node.nodeValue||'',trimmed=raw.trim(),translated=dictionary[trimmed];
+        var raw=node.nodeValue||'',trimmed=raw.trim(),normalized=trimmed.replace(/[»:]$/,'').trim(),translated=dictionary[trimmed]||dictionary[normalized];
+        if(!translated){var lowered=normalized.toLocaleLowerCase(),prefix=Object.keys(prefixDictionary).find(function(item){return lowered===item||lowered.indexOf(item+' ')===0;});if(prefix)translated=prefixDictionary[prefix]+normalized.slice(prefix.length);}
+        if(translated&&/[»:]$/.test(trimmed))translated+=trimmed.slice(-1);
         if(translated)node.nodeValue=raw.replace(trimmed,translated);
       });
     }

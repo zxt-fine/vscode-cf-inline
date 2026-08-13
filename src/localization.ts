@@ -11,7 +11,7 @@ export const CONTROLLED_CODEFORCES_DESKTOP_CSS =
   'html[data-cf-inline-effective-compact="true"] #pageContent,html[data-cf-inline-effective-compact="true"] #pageContent>.content{box-sizing:border-box;min-width:0!important;max-width:100%!important;width:auto!important}' +
   'html[data-cf-inline-effective-compact="true"] .content-with-sidebar{margin-right:0!important}' +
   'html[data-cf-inline-effective-compact="true"] .problem-statement,html[data-cf-inline-effective-compact="true"] .cf-inline-translated-statement{overflow-wrap:anywhere}' +
-  '.mobile-menu,.mobile-menu-toggle,.mobile-header,[class*="mobile-menu"],[class*="mobile-navigation"],[class*="mobile-nav"]{display:none!important}' +
+  '.mobile-toolbar,.mobile-menu,.mobile-menu-toggle,.mobile-header,[class*="mobile-menu"],[class*="mobile-navigation"],[class*="mobile-nav"]{display:none!important}' +
   '.menu-box{display:block!important;height:auto!important;overflow:visible!important}' +
   '.menu-list{display:block!important;position:static!important;height:auto!important;overflow:visible!important;flex-wrap:nowrap!important}' +
   '.menu-list li{display:inline-block!important;float:none!important}' +
@@ -123,7 +123,58 @@ export const UI_TRANSLATIONS: Record<string, string> = {
   'standard output': '标准输出',
   'time limit per test': '每个测试点的时间限制',
   'memory limit per test': '每个测试点的内存限制',
+  'Главная': '主页',
+  'Топ': '热门',
+  'Каталог': '目录',
+  'Соревнования': '比赛',
+  'Тренировки': '训练营',
+  'Архив': '题库',
+  'Группы': '群组',
+  'Рейтинг': '排行榜',
+  'Образование': '教程',
+  'Календарь': '日历',
+  'Помощь': '帮助',
+  'Выйти': '退出登录',
+  'Настройки': '设置',
+  'Списки': '列表',
+  'Блог': '博客',
+  'Команды': '队伍',
+  'Попытки': '提交记录',
+  'Избранное': '收藏',
+  'Название': '名称',
+  'Начало': '开始时间',
+  'Длит.': '持续时间',
+  'Результаты': '结果',
+  'Войти': '进入',
+  'Виртуальное участие': '虚拟参赛',
+  'Условия': '题目',
+  'Участники': '参赛者',
+  'Фильтр тренировок': '训练营筛选',
+  'Сезон': '赛季',
+  'Тип соревнования': '比赛类型',
+  'Формат соревнования': '比赛形式',
+  'Длительность, часов': '持续时间（小时）',
+  'Сложность': '难度',
+  'Упорядочить по': '排序方式',
+  'Скрыть прошедшие': '隐藏已结束项目',
+  'Выбрать': '应用',
+  'Сбросить': '重置',
+  'Найти тренировку': '查找训练营',
 };
+
+export const UI_PREFIX_TRANSLATIONS: Record<string, string> = {
+  'prepared by': '出题人',
+  'подготовил': '出题人',
+  'автор': '作者',
+};
+
+function buildUiTranslationDictionary(): Record<string, string> {
+  const dictionary = { ...UI_TRANSLATIONS };
+  for (const [key, value] of Object.entries(UI_TRANSLATIONS)) {
+    if (/[\u0400-\u04ff]/.test(key)) dictionary[key.toUpperCase()] = value;
+  }
+  return dictionary;
+}
 
 const translationCache = new Map<string, string>();
 const MAX_CONCURRENT_TRANSLATIONS = 6;
@@ -244,6 +295,7 @@ export function isUsefulChineseTranslation(source: string, translated: string): 
       .replace(/⟦CFI\d+⟧/g, '')
       .replace(/ZXCF(?:MATH|SAFE)\d+XZ/gi, '')
       .replace(/\[\[\s*93\s*\d+\s*7\s*\d+\s*(?:39|49)\s*\]\]/g, '')
+      .replace(/<[^>]*>/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
   const original = stripMarkers(source);
@@ -252,12 +304,22 @@ export function isUsefulChineseTranslation(source: string, translated: string): 
     return false;
   }
   const sourceLatin = (original.match(/[A-Za-z]/g) ?? []).length;
-  if (candidate.toLowerCase() === original.toLowerCase() && sourceLatin >= 12) {
+  const sourceCyrillic = (original.match(/[\u0400-\u04ff]/g) ?? []).length;
+  if (candidate.toLowerCase() === original.toLowerCase() && sourceLatin + sourceCyrillic >= 12) {
     return false;
   }
   const translatedLatin = (candidate.match(/[A-Za-z]/g) ?? []).length;
+  const translatedCyrillic = (candidate.match(/[\u0400-\u04ff]/g) ?? []).length;
   const translatedHan = (candidate.match(/[\u3400-\u9fff]/g) ?? []).length;
-  if (sourceLatin >= 12 && translatedHan < 2) {
+  const sourceForeignWords = (original.match(/[A-Za-z\u0400-\u04ff]{2,}/g) ?? []).length;
+  const translatedForeignWords = (candidate.match(/[A-Za-z\u0400-\u04ff]{2,}/g) ?? []).length;
+  if (sourceLatin + sourceCyrillic >= 12 && translatedHan < 2) {
+    return false;
+  }
+  if (sourceCyrillic >= 12 && translatedCyrillic >= Math.max(10, sourceCyrillic * 0.45)) {
+    return false;
+  }
+  if (sourceForeignWords >= 8 && translatedForeignWords >= Math.max(6, sourceForeignWords * 0.55)) {
     return false;
   }
   if (translatedHan >= 2 && /(?:\b[A-Za-z]{2,}\b[\s,;:'"()\-–—]*){6,}/.test(candidate)) {
@@ -267,6 +329,30 @@ export function isUsefulChineseTranslation(source: string, translated: string): 
     return false;
   }
   return true;
+}
+
+export function formatCodeforcesLimitLabel(
+  kind: 'time' | 'memory',
+  source: string
+): string | undefined {
+  const text = String(source ?? '').replace(/\s+/g, ' ').trim();
+  const value = text.match(/\b(\d+(?:[.,]\d+)?)\b/)?.[1]?.replace(',', '.');
+  if (!value) return undefined;
+  const lower = text.toLowerCase();
+  if (kind === 'time') {
+    const unit = /millisecond|миллисекунд|毫秒/.test(lower)
+      ? '毫秒'
+      : /minute|минут|分钟/.test(lower)
+        ? '分钟'
+        : '秒';
+    return `每个测试点的时间限制：${value} ${unit}`;
+  }
+  const unit = /kilobyte|килобайт|千字节|\bkb\b/.test(lower)
+    ? '千字节'
+    : /gigabyte|гигабайт|吉字节|\bgb\b/.test(lower)
+      ? '吉字节'
+      : '兆字节';
+  return `每个测试点的内存限制：${value} ${unit}`;
 }
 
 /**
@@ -511,7 +597,7 @@ async function translateOne(html: string, requester: TranslationRequester): Prom
     const value = refineCompetitiveProgrammingTranslation(html, rawValue);
     if (!isUsefulChineseTranslation(html, value)) {
       const label = provider === 'deepl' ? 'DeepL' : provider === 'bing' ? 'Bing' : 'Google';
-      throw new Error(`${label} 返回的内容仍为英文原文`);
+      throw new Error(`${label} 返回的内容仍包含大量未翻译的英文或俄文`);
     }
     return value;
   };
@@ -709,16 +795,20 @@ export function buildPageZoomClientScript(): string {
 }
 
 export function buildLocalizationClientScript(options: LocalizationOptions): string {
-  const dictionary = JSON.stringify(UI_TRANSLATIONS).replace(/</g, '\\u003c');
+  const dictionary = JSON.stringify(buildUiTranslationDictionary()).replace(/</g, '\\u003c');
+  const prefixDictionary = JSON.stringify(UI_PREFIX_TRANSLATIONS).replace(/</g, '\\u003c');
   const enabled = JSON.stringify(options.localizeInterface);
   const auto = JSON.stringify(options.autoTranslateStatements);
   const pageZoom = buildPageZoomClientScript();
   const translationRefiner = refineCompetitiveProgrammingTranslation.toString();
+  const limitFormatter = formatCodeforcesLimitLabel.toString();
   const controlledDesktopStyle = JSON.stringify(CONTROLLED_CODEFORCES_DESKTOP_CSS);
   return `<script>(function(){
     ${pageZoom};
     var dictionary=${dictionary};
+    var prefixDictionary=${prefixDictionary};
     var refineContestTranslation=${translationRefiner};
+    var formatLimitLabel=${limitFormatter};
     var localizationEnabled=${enabled};
     var autoTranslateStatements=${auto};
     var skipSelector='script,style,noscript,pre,code,textarea,[contenteditable="true"],.MathJax,.MathJax_Preview,.tex-span,.ttypography';
@@ -735,7 +825,11 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       var raw=node.nodeValue||'';
       var key=raw.trim();
       if(!key) return;
-      var replacement=dictionary[key]||dictionary[key.replace(/[»:]$/,'').trim()];
+      var normalized=key.replace(/[»:]$/,'').trim(),replacement=dictionary[key]||dictionary[normalized];
+      if(!replacement){
+        var lowered=normalized.toLocaleLowerCase(),prefix=Object.keys(prefixDictionary).find(function(item){return lowered===item||lowered.indexOf(item+' ')===0;});
+        if(prefix)replacement=prefixDictionary[prefix]+normalized.slice(prefix.length);
+      }
       if(!replacement) return;
       if(/[»:]$/.test(key)) replacement+=key.slice(-1);
       node.nodeValue=raw.replace(key,replacement);
@@ -773,7 +867,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
     }
     async function translateTextNodesSafely(block){
       var clone=block.cloneNode(true);
-      Array.from(clone.querySelectorAll('.cf-inline-paragraph-toolbar,.cf-inline-paragraph-control,.cf-inline-paragraph-translation')).forEach(function(node){node.remove();});
+      Array.from(clone.querySelectorAll('.cf-inline-paragraph-toolbar,.cf-inline-paragraph-control,.cf-inline-paragraph-translation,.cf-inline-title-favorite')).forEach(function(node){node.remove();});
       Array.from(clone.querySelectorAll('.MathJax_Preview,script,style')).forEach(function(node){node.remove();});
       // tex-font-style-bf/it are ordinary Codeforces text formatting spans,
       // not formulas. Protecting them used to exclude the entire bold
@@ -781,15 +875,16 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       // by MathJax/mjx-container/tex-span.
       var protectedSelector='pre,code,.MathJax,mjx-container,.tex-span,img,svg,table';
       var scopeSelector='p,li,blockquote,h1,h2,h3,h4,h5,h6,.header>.title,.section-title';
+      function hasTranslatableText(value){return /[A-Za-z]{2}/.test(String(value||''))||/[\u0400-\u04ff]{2}/.test(String(value||''));}
       var scopes=Array.from(clone.querySelectorAll(scopeSelector)).filter(function(scope){
         return !scope.closest('pre,code,.sample-tests')&&!scope.parentElement.closest(scopeSelector);
       });
       if(clone.matches&&clone.matches(scopeSelector))scopes.unshift(clone);
-      if(!scopes.length&&/[A-Za-z]{2}/.test(clone.textContent||''))scopes.push(clone);
+      if(!scopes.length&&hasTranslatableText(clone.textContent||''))scopes.push(clone);
       var covered=new Set(scopes),walker=document.createTreeWalker(clone,NodeFilter.SHOW_TEXT),extra=[];
       while(walker.nextNode()){
         var textNode=walker.currentNode,parent=textNode.parentElement;
-        if(!parent||!/[A-Za-z]{2}/.test(textNode.nodeValue||'')||parent.closest(protectedSelector+',.sample-tests'))continue;
+        if(!parent||!hasTranslatableText(textNode.nodeValue||'')||parent.closest(protectedSelector+',.sample-tests'))continue;
         if(scopes.some(function(scope){return scope.contains(textNode);}))continue;
         if(dictionary[(textNode.nodeValue||'').trim()])continue;
         var nearest=parent;
@@ -815,11 +910,14 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         scopes.unshift(specialVersionScope);
       }
       function useful(source,translated){
-        var clean=function(value){return String(value||'').replace(/\\[\\[\\s*93\\s*\\d+\\s*7\\s*\\d+\\s*(?:39|49)\\s*\\]\\]/g,'').replace(/\\s+/g,' ').trim();};
-        var original=clean(source),candidate=clean(translated),sourceLatin=(original.match(/[A-Za-z]/g)||[]).length;
-        if(!candidate||candidate.toLowerCase()===original.toLowerCase()&&sourceLatin>=12)return false;
-        var translatedLatin=(candidate.match(/[A-Za-z]/g)||[]).length,translatedHan=(candidate.match(/[\u3400-\u9fff]/g)||[]).length;
-        if(sourceLatin>=12&&translatedHan<2)return false;
+        var clean=function(value){return String(value||'').replace(/\\[\\[\\s*93\\s*\\d+\\s*7\\s*\\d+\\s*(?:39|49)\\s*\\]\\]/g,'').replace(/<[^>]*>/g,' ').replace(/\\s+/g,' ').trim();};
+        var original=clean(source),candidate=clean(translated),sourceLatin=(original.match(/[A-Za-z]/g)||[]).length,sourceCyrillic=(original.match(/[\u0400-\u04ff]/g)||[]).length;
+        if(!candidate||candidate.toLowerCase()===original.toLowerCase()&&sourceLatin+sourceCyrillic>=12)return false;
+        var translatedLatin=(candidate.match(/[A-Za-z]/g)||[]).length,translatedCyrillic=(candidate.match(/[\u0400-\u04ff]/g)||[]).length,translatedHan=(candidate.match(/[\u3400-\u9fff]/g)||[]).length;
+        var sourceForeignWords=(original.match(/[A-Za-z\u0400-\u04ff]{2,}/g)||[]).length,translatedForeignWords=(candidate.match(/[A-Za-z\u0400-\u04ff]{2,}/g)||[]).length;
+        if(sourceLatin+sourceCyrillic>=12&&translatedHan<2)return false;
+        if(sourceCyrillic>=12&&translatedCyrillic>=Math.max(10,sourceCyrillic*.45))return false;
+        if(sourceForeignWords>=8&&translatedForeignWords>=Math.max(6,sourceForeignWords*.55))return false;
         if(translatedHan>=2&&/(?:\\b[A-Za-z]{2,}\\b[\\s,;:'"()\\-–—]*){6,}/.test(candidate))return false;
         return sourceLatin<40||translatedLatin<sourceLatin*.72;
       }
@@ -909,7 +1007,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       }
       var units=scopes.map(function(scope,index){return prepare(scope,index,false);}).filter(function(unit){
         var prose=unit.source.replace(/\\[\\[\\s*93\\s*\\d+\\s*7\\s*\\d+\\s*(?:39|49)\\s*\\]\\]/g,'').trim();
-        return /[A-Za-z]{2}/.test(prose)&&!dictionary[prose];
+        return /[A-Za-z\u0400-\u04ff]{2}/.test(prose)&&!dictionary[prose];
       });
       units=units.filter(function(unit){
         var local=localVersionNotice(unit);if(!local)return true;
@@ -955,7 +1053,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           fragmentFallback.forEach(function(fallback){
             if(!fallback.unit.sourceValid||fallback.unit.sourceSegments.length!==fallback.unit.nodes.length+1)throw new Error('题面公式分段结构无效');
             var segments=fallback.unit.sourceSegments.slice();fallback.segments=segments;
-            segments.forEach(function(segment,index){if(/[A-Za-z]{2}/.test(segment))fragments.push({fallback:fallback,index:index,text:segment});});
+            segments.forEach(function(segment,index){if(/[A-Za-z\u0400-\u04ff]{2}/.test(segment))fragments.push({fallback:fallback,index:index,text:segment});});
           });
           var fragmentTranslations=new Array(fragments.length),missingFragments=[];
           fragments.forEach(function(fragment,index){
@@ -974,7 +1072,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
             }
             else incompleteFragments.push(fragment.text);
           });
-          if(incompleteFragments.length)throw new Error('在线翻译仍返回英文原文');
+          if(incompleteFragments.length)throw new Error('在线翻译仍包含大量未翻译的英文或俄文');
           fragmentFallback.forEach(function(fallback){
             var rebuilt='';fallback.unit.nodes.forEach(function(node,index){rebuilt+=fallback.segments[index]+token(fallback.unit,index);});rebuilt+=fallback.segments[fallback.segments.length-1];
             fallback.entry.unit=fallback.unit;translations[fallback.entry.index]=rebuilt;
@@ -1008,6 +1106,22 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         return {kind:'problemset',contestId:parts[2],index:parts[3],submitPath:'/problemset/submit',submissionsPath:'/problemset/status?my=on'};
       }
       return null;
+    }
+    function installPracticeTracker(){
+      var route=parseProblemRoute(),statement=document.querySelector('.problem-statement:not(.cf-inline-translated-statement)');
+      if(!route||!statement||statement.dataset.cfInlinePractice)return;statement.dataset.cfInlinePractice='1';
+      function cleanPracticeText(value){return String(value||'').replace(/[\\t\\r\\n ]+/g,' ').trim()}
+      var header=statement.querySelector('.header'),titleNode=header&&header.querySelector('.title'),title=cleanPracticeText(titleNode&&titleNode.textContent).replace(/^[A-Za-z0-9]+[.：:\s-]*/,'').trim();
+      var ratingNode=header&&header.querySelector('[title*="Rating"]'),ratingMatch=cleanPracticeText(ratingNode&&ratingNode.parentElement&&ratingNode.parentElement.textContent).match(/\b(\d{3,4})\b/),rating=ratingMatch?Number(ratingMatch[1]):undefined;
+      var tags=[];document.querySelectorAll('.tag-box').forEach(function(node){var value=cleanPracticeText(node.textContent),ratingTag=value.match(/^\\*?(\\d{3,4})$/);if(ratingTag&&!rating)rating=Number(ratingTag[1]);else if(value&&value.length<100&&tags.indexOf(value)<0)tags.push(value)});
+      var titleFavorite=document.createElement('button');titleFavorite.type='button';titleFavorite.className='cf-inline-title-favorite';titleFavorite.title='将这道题加入个人收藏';titleFavorite.textContent='☆ 收藏题目';if(titleNode)titleNode.appendChild(titleFavorite);
+      var section=document.createElement('section');section.className='cf-inline-practice';section.innerHTML='<div class="cf-inline-practice-heading"><strong>刷题记录</strong><button type="button" class="cf-inline-favorite">☆ 收藏</button><a href="/__cf_inline/dashboard">个人仪表盘</a><span class="cf-inline-practice-status"></span></div><div class="cf-inline-practice-body"><label>进度<select><option value="" selected disabled>请选择状态</option><option value="todo">待做</option><option value="doing">正在做</option><option value="review">需要复习</option><option value="mastered">已掌握</option></select></label><label class="cf-inline-note-label">个人备注<textarea maxlength="10000" placeholder="记录思路、易错点或下次复习目标"></textarea></label></div>';
+      statement.parentNode.insertBefore(section,statement);var favorite=section.querySelector('.cf-inline-favorite'),select=section.querySelector('select'),note=section.querySelector('textarea'),status=section.querySelector('.cf-inline-practice-status');
+      var model={contestId:Number(route.contestId),index:String(route.index),name:title,url:location.pathname+location.search,rating:rating,tags:tags,favorite:false,status:'todo',note:''},saveTimer=0,recordExists=false;select.disabled=true;
+      function paint(){favorite.textContent=model.favorite?'★ 已收藏':'☆ 收藏';favorite.classList.toggle('active',model.favorite);favorite.setAttribute('aria-pressed',String(model.favorite));favorite.title=model.favorite?'点击取消收藏':'将这道题加入个人收藏';document.querySelectorAll('.cf-inline-title-favorite').forEach(function(button){button.textContent=model.favorite?'★ 已收藏':'☆ 收藏题目';button.classList.toggle('active',model.favorite);button.setAttribute('aria-pressed',String(model.favorite));button.title=model.favorite?'点击取消收藏':'将这道题加入个人收藏'});select.value=recordExists?(model.status||'todo'):'';if(document.activeElement!==note)note.value=model.note||''}
+      function save(){clearTimeout(saveTimer);var creating=!recordExists;recordExists=true;status.textContent='正在保存…';fetch('/__cf_inline/practice/problem?contestId='+encodeURIComponent(model.contestId)+'&index='+encodeURIComponent(model.index),{method:'POST',headers:{'Content-Type':'application/json','X-CF-Inline':'practice'},body:JSON.stringify(model)}).then(function(response){return response.json().then(function(result){if(!response.ok)throw new Error(result.error||('HTTP '+response.status));return result})}).then(function(result){model=result.problem;recordExists=true;paint();status.textContent='已保存'}).catch(function(error){if(creating)recordExists=false;status.textContent='保存失败：'+String(error&&error.message||error)})}
+      function toggleFavorite(event){event.preventDefault();event.stopPropagation();model.favorite=!model.favorite;paint();save()}favorite.onclick=toggleFavorite;titleFavorite.onclick=toggleFavorite;select.onchange=function(){if(!select.value)return;model.status=select.value;save()};note.addEventListener('input',function(){model.note=note.value;clearTimeout(saveTimer);status.textContent='尚未保存';saveTimer=setTimeout(save,650)});
+      fetch('/__cf_inline/practice/problem?contestId='+encodeURIComponent(model.contestId)+'&index='+encodeURIComponent(model.index),{cache:'no-store'}).then(function(response){return response.json()}).then(function(result){recordExists=!!result.problem;if(result.problem)model=Object.assign(model,result.problem);paint();select.disabled=false;status.textContent=result.problem?'已载入本地记录':'尚未记录'}).catch(function(){select.disabled=false;status.textContent='暂时无法读取记录'});
     }
     function submitThroughOfficialEdge(payload){
       return fetch('/__cf_inline/submit',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CF-Inline':'submit'},body:JSON.stringify(payload)}).then(function(response){
@@ -1182,11 +1296,23 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
     }
     async function readLatestSubmission(route){
       var separator=route.submissionsPath.indexOf('?')===-1?'?':'&';
-      var response=await fetch(route.submissionsPath+separator+'cf_inline_poll='+Date.now(),{credentials:'same-origin',cache:'no-store'});
+      var controller=new AbortController(),timer=setTimeout(function(){controller.abort();},15000),response;
+      try{response=await fetch(route.submissionsPath+separator+'cf_inline_poll='+Date.now(),{credentials:'same-origin',cache:'no-store',signal:controller.signal});}
+      finally{clearTimeout(timer);}
       var html=await response.text();
       if(!response.ok)throw new Error(readSubmitError(html,response.status)||('HTTP '+response.status));
       if(new DOMParser().parseFromString(html,'text/html').querySelector('#enterForm'))throw new Error('登录状态已失效');
       return parseSubmissionRows(html,route)[0]||null;
+    }
+    async function readLatestSubmissionApi(route){
+      var controller=new AbortController(),timer=setTimeout(function(){controller.abort();},20000),response;
+      try{response=await fetch('/__cf_inline/submission-status?contestId='+encodeURIComponent(route.contestId)+'&index='+encodeURIComponent(route.index),{headers:{'X-CF-Inline':'submission-status'},credentials:'same-origin',cache:'no-store',signal:controller.signal});}
+      finally{clearTimeout(timer);}
+      var result=await response.json().catch(function(){return{};});
+      if(!response.ok)throw new Error(result.error||('HTTP '+response.status));
+      var item=result.submission;if(!item||!item.id)return null;
+      var display=verdictDisplay(item.verdict||'',item.verdict||'');
+      return {id:String(item.id),href:route.submissionsPath,label:display.label,pending:display.pending,accepted:display.accepted,time:item.timeConsumedMillis!=null?String(item.timeConsumedMillis)+' ms':'',memory:item.memoryConsumedBytes!=null?Math.round(Number(item.memoryConsumedBytes)/1024)+' KB':''};
     }
     function renderSubmissionResult(status,record,message){
       status.textContent=message||('提交 #'+record.id+'：'+record.label+(record.time?' · '+record.time:'')+(record.memory?' · '+record.memory:''));
@@ -1201,7 +1327,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       async function check(){
         if(!isActive(sequence))return;
         try{
-          var record=await readLatestSubmission(route);
+          var record;try{record=await readLatestSubmission(route);}catch(pageError){record=await readLatestSubmissionApi(route);}
           if(record&&record.id!==previousId){lastRecord=record;renderSubmissionResult(status,record);if(!record.pending)return;}
           else{status.className='cf-inline-submit-status is-loading';status.textContent='Codeforces 已接收代码，正在等待提交记录和评测结果…';}
           schedule(2000);
@@ -1265,14 +1391,16 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           }).then(function(result){
             var response=result.response;
             var message=readSubmitError(String(response.html||''),Number(response.status||200));if(message) throw new Error(message);
+            var responseRecord=parseSubmissionRows(String(response.html||''),route)[0]||null;
             status.className='cf-inline-submit-status is-loading';status.textContent='Codeforces 已接收代码，正在等待评测结果…';
+            if(responseRecord&&responseRecord.id!==result.previousId)renderSubmissionResult(status,responseRecord);
             pollSubmissionResult(route,result.previousId,status,sequence,function(value){return value===activeSubmissionSequence;});
           }).catch(function(error){status.className='cf-inline-submit-status is-error';status.textContent='提交失败：'+String(error&&error.message||error);}).finally(function(){submit.disabled=false;language.disabled=false;file.disabled=false;});
         });
       }).catch(function(error){loading.className='cf-inline-submit-status is-error';loading.textContent='提交框加载失败：'+String(error&&error.message||error)+' 请刷新页面重试。';});
     }
     var paragraphTranslationSequence=100000;
-    function isEligibleEnglishParagraph(block){
+    function isEligibleForeignParagraph(block){
       if(!block||block.dataset.cfInlineParagraphTranslator) return false;
       if(block.closest('.problem-statement,.cf-inline-translated-wrap,.cf-inline-submit-wrap,.cf-inline-paragraph-translation,.cf-inline-too-narrow,#header,#footer,#sidebar,.menu-box,.second-level-menu,.datatable,form')) return false;
       var groupedParent=block.parentElement&&block.parentElement.closest('.ttypography[data-cf-inline-paragraph-translator="1"]');
@@ -1280,8 +1408,8 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       if((block.matches('ul,ol'))&&block.parentElement&&block.parentElement.closest('ul[data-cf-inline-paragraph-translator="1"],ol[data-cf-inline-paragraph-translator="1"]')) return false;
       var text=(block.textContent||'').replace(/\\s+/g,' ').trim();
       if(text.length<8||text.length>12000) return false;
-      var englishLetters=(text.match(/[A-Za-z]/g)||[]).length;
-      return englishLetters>=6;
+      var latinLetters=(text.match(/[A-Za-z]/g)||[]).length,cyrillicLetters=(text.match(/[\u0400-\u04ff]/g)||[]).length;
+      return latinLetters>=6||cyrillicLetters>=6;
     }
     function installGlobalParagraphTranslators(root){
       var page=document.querySelector('#pageContent')||document.body;
@@ -1292,14 +1420,14 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         root.querySelectorAll('.ttypography,p,blockquote,ul,ol').forEach(function(block){candidates.push(block);});
       }
       candidates.forEach(function(block){
-        if(!page.contains(block)||!isEligibleEnglishParagraph(block)) return;
+        if(!page.contains(block)||!isEligibleForeignParagraph(block)) return;
         var placement=block.closest('a[href]')||block;
         if(placement!==block&&placement.dataset.cfInlineParagraphTranslatorPlacement) return;
         block.dataset.cfInlineParagraphTranslator='1';
         if(placement!==block) placement.dataset.cfInlineParagraphTranslatorPlacement='1';
         var toolbar=document.createElement('div');toolbar.className='cf-inline-paragraph-toolbar';
         var control=document.createElement('button');
-        control.type='button';control.className='cf-inline-paragraph-control';control.textContent='翻译整段';control.title='合并翻译这组连续内容，英文原文保持不变';
+        control.type='button';control.className='cf-inline-paragraph-control';control.textContent='翻译整段';control.title='合并翻译这组连续内容，原文保持不变';
         toolbar.appendChild(control);
         var translation=document.createElement('div');
         translation.className='cf-inline-paragraph-translation';translation.hidden=true;
@@ -1346,16 +1474,24 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       var blocks=Array.from(statement.children).filter(function(block){return block.tagName!=='SCRIPT'&&!block.classList.contains('cf-inline-translate-bar');});
       var bar=document.createElement('div'); bar.className='cf-inline-translate-bar';
       var button=document.createElement('button'); button.type='button'; button.textContent='翻译题面';
-      var status=document.createElement('span'); status.textContent=autoTranslateStatements?'准备在原题下方生成中文译文…':'可在英文原题下方生成中文译文';
+      var status=document.createElement('span'); status.textContent=autoTranslateStatements?'准备在原题下方生成中文译文…':'可在外文原题下方生成中文译文';
       bar.appendChild(button); bar.appendChild(status); statement.insertBefore(bar,statement.firstChild);
       var translatedWrap=null,busy=false;
+      function restoreTranslatedHeader(originalStatement,translatedStatement){
+        [['.time-limit','time'],['.memory-limit','memory']].forEach(function(entry){
+          var original=originalStatement.querySelector(entry[0]),translated=translatedStatement.querySelector(entry[0]);
+          if(!original||!translated)return;var label=formatLimitLabel(entry[1],original.textContent||'');if(label)translated.textContent=label;
+        });
+        var originalFavorite=originalStatement.querySelector('.cf-inline-title-favorite'),translatedTitle=translatedStatement.querySelector('.header>.title');
+        if(originalFavorite&&translatedTitle){var mirror=originalFavorite.cloneNode(true);mirror.onclick=function(event){event.preventDefault();event.stopPropagation();originalFavorite.click();};translatedTitle.appendChild(mirror);}
+      }
       async function run(){
         if(busy) return;
         if(translatedWrap){
           var hidden=translatedWrap.hidden;
           translatedWrap.hidden=!hidden;
           button.textContent=hidden?'隐藏中文译文':'显示中文译文';
-          status.textContent=hidden?'中文译文显示在英文原题下方':'中文译文已隐藏，英文原题保持不变';
+          status.textContent=hidden?'中文译文显示在原题下方':'中文译文已隐藏，原题保持不变';
           return;
         }
         busy=true; button.disabled=true; status.textContent='正在生成独立中文译文，请稍候…';
@@ -1363,7 +1499,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           var prepared=[];
           blocks.forEach(function(block,index){
             if(block.classList.contains('sample-tests')) return;
-            if(/[A-Za-z]{2}/.test(block.textContent||''))prepared.push({index:index,block:block});
+            if(/[A-Za-z\u0400-\u04ff]{2}/.test(block.textContent||''))prepared.push({index:index,block:block});
           });
           if(!prepared.length) throw new Error('当前题面不需要翻译');
           var translatedByIndex=new Map(),translationErrors=[];
@@ -1383,10 +1519,11 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           var heading=document.createElement('div'); heading.className='cf-inline-translated-heading'; heading.textContent='中文翻译';
           var translatedStatement=document.createElement('div'); translatedStatement.className='problem-statement cf-inline-translated-statement';
           blocks.forEach(function(block,index){translatedStatement.appendChild(translatedByIndex.get(index)||block.cloneNode(true));});
+          restoreTranslatedHeader(statement,translatedStatement);
           translatedWrap.appendChild(heading); translatedWrap.appendChild(translatedStatement);
           statement.parentNode.insertBefore(translatedWrap,statement.nextSibling);
           localize(translatedStatement);
-          button.textContent='隐藏中文译文'; status.textContent='中文译文显示在英文原题下方；英文原题保持不变';
+          button.textContent='隐藏中文译文'; status.textContent='中文译文显示在原题下方；原题保持不变';
         }catch(error){status.textContent='翻译失败：'+String(error&&error.message||error);}
         finally{busy=false;button.disabled=false;}
       }
@@ -1399,13 +1536,15 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       installGlobalParagraphTranslators(document);
       installSubmitFormRepair();
       installInlineSubmitter();
+      installPracticeTracker();
       installSampleCopyButtons(document);
       installViewportGuard();
-      new MutationObserver(function(mutations){mutations.forEach(function(m){m.addedNodes.forEach(function(node){localize(node);installStatementTranslator();installGlobalParagraphTranslators(node);installSubmitFormRepair();installInlineSubmitter();installSampleCopyButtons(node);});});}).observe(document.documentElement,{childList:true,subtree:true});
+      new MutationObserver(function(mutations){mutations.forEach(function(m){m.addedNodes.forEach(function(node){localize(node);installStatementTranslator();installGlobalParagraphTranslators(node);installSubmitFormRepair();installInlineSubmitter();installPracticeTracker();installSampleCopyButtons(node);});});}).observe(document.documentElement,{childList:true,subtree:true});
     }
     var paragraphStyle=document.createElement('style');paragraphStyle.textContent='.cf-inline-paragraph-toolbar{box-sizing:border-box;display:flex;justify-content:flex-end;align-items:center;min-height:28px;margin:10px 0 4px;padding:0;border-bottom:1px solid #d7e0e8}.cf-inline-paragraph-control{margin:0 0 4px;padding:3px 9px;border:1px solid #9aa8b5;border-radius:3px;background:#f4f8fc;color:#245d8f;font:12px Arial,sans-serif;cursor:pointer}.cf-inline-paragraph-control:disabled{opacity:.6;cursor:wait}.cf-inline-paragraph-translation{box-sizing:border-box;display:block;margin:7px 0 14px;padding:10px 12px;border-left:3px solid #4a90e2;background:#eef6ff;color:#183b59;font:13px/1.65 Arial,sans-serif}.cf-inline-paragraph-translation>*:first-child{margin-top:0}.cf-inline-paragraph-translation>*:last-child{margin-bottom:0}.cf-inline-paragraph-translation[hidden]{display:none}.cf-inline-paragraph-translation.is-error{border-left-color:#c43b3b;background:#fff1f1;color:#8b2222}@media (max-width:520px){.cf-inline-paragraph-toolbar{justify-content:stretch}.cf-inline-paragraph-control{width:100%}}';document.head.appendChild(paragraphStyle);
     var sampleCopyStyle=document.createElement('style');sampleCopyStyle.textContent='.cf-inline-sample-copy{box-sizing:border-box;float:right;margin:-2px 0 0 10px;padding:2px 9px;border:1px solid #8fa5b8;border-radius:3px;background:#f5f8fb;color:#245d8f;font:12px/1.45 Arial,sans-serif;cursor:pointer}.cf-inline-sample-copy:hover{background:#e8f2fc}.cf-inline-sample-copy:disabled{opacity:.75;cursor:default}.cf-inline-sample-copy.is-error{border-color:#c26464;background:#fff1f1;color:#9c2525}';document.head.appendChild(sampleCopyStyle);
     var style=document.createElement('style'); style.textContent='.cf-inline-translate-bar{display:flex;align-items:center;gap:10px;margin:0 0 1em;padding:8px 10px;border:1px solid #b9b9b9;border-radius:4px;background:#f5f5f5;font-family:Arial,sans-serif;font-size:13px}.cf-inline-translate-bar button{padding:4px 12px;cursor:pointer}.cf-inline-translate-bar span{color:#555}.cf-inline-translated-wrap{margin:1.2em 0;padding:0;border:2px solid #4a90e2;border-radius:6px;background:#fff}.cf-inline-translated-heading{padding:9px 14px;background:#eaf3ff;border-bottom:1px solid #b8d6f4;color:#174f86;font:bold 15px Arial,sans-serif}.cf-inline-translated-statement{margin:0!important;padding:1.2em!important}.cf-inline-translated-wrap[hidden]{display:none}.cf-inline-submit-wrap{margin:1.2em 0 2em;border:2px solid #4e9b68;border-radius:6px;background:#fff;font:14px Arial,sans-serif;color:#222}.cf-inline-submit-heading{padding:10px 14px;background:#eaf7ee;border-bottom:1px solid #b8dcc4;color:#24633a;font:bold 16px Arial,sans-serif}.cf-inline-submit-content{padding:14px}.cf-inline-submit-loading{padding:12px;color:#555}.cf-inline-submit-form{display:flex;flex-direction:column;gap:9px}.cf-inline-submit-row{display:flex;align-items:center;gap:12px}.cf-inline-submit-row>span,.cf-inline-submit-source-label{font-weight:bold}.cf-inline-submit-row select{min-width:320px;max-width:100%;padding:5px}.cf-inline-submit-form textarea{box-sizing:border-box;width:100%;min-height:360px;resize:vertical;padding:10px;border:1px solid #aaa;border-radius:3px;font:13px/1.5 Consolas,"Courier New",monospace;tab-size:4}.cf-inline-submit-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.cf-inline-file-button,.cf-inline-submit-tools button{display:inline-block;padding:7px 13px;border:1px solid #888;border-radius:3px;background:#f4f4f4;cursor:pointer}.cf-inline-file-button input{display:none}.cf-inline-submit-tools button{margin-left:auto;border-color:#347a4c;background:#3f925b;color:#fff;font-weight:bold}.cf-inline-submit-tools button:disabled{opacity:.6;cursor:wait}.cf-inline-file-name{color:#666}.cf-inline-submit-status{min-height:20px;padding:6px 8px;border-radius:3px;background:#f5f5f5;color:#555}.cf-inline-submit-status.is-loading{background:#fff8df;color:#765a00}.cf-inline-submit-status.is-success{background:#eaf7ee;color:#24633a}.cf-inline-submit-status.is-error{background:#fff0f0;color:#a32626}.cf-inline-submit-status a{margin-left:8px;font-weight:bold}.cf-inline-too-narrow{display:none}html,body{max-width:100%}.problem-statement,.cf-inline-translated-wrap,.cf-inline-submit-wrap{box-sizing:border-box;max-width:100%}.problem-statement img,.problem-statement table{max-width:100%}.problem-statement .sample-tests,.problem-statement .input,.problem-statement .output{min-width:0;max-width:100%}.problem-statement pre,.datatable{max-width:100%;overflow-x:auto}.MathJax_Display,mjx-container[display="true"]{max-width:100%;overflow-x:auto;overflow-y:hidden}@media (max-width:1200px){html,body{min-width:0!important;overflow-x:hidden}#body{box-sizing:border-box;width:auto!important;min-width:0!important;max-width:100%!important;margin-left:12px!important;margin-right:12px!important}#pageContent,#pageContent>.content{box-sizing:border-box;min-width:0!important;max-width:100%!important;width:auto!important}.content-with-sidebar{margin-right:0!important}#sidebar{display:none!important}.problem-statement,.cf-inline-translated-statement{overflow-wrap:anywhere}.problem-statement table{display:block;overflow-x:auto}.roundbox{max-width:100%;box-sizing:border-box}}@media (max-width:760px){#body{margin-left:7px!important;margin-right:7px!important}.menu-box,.menu-list,.second-level-menu,.second-level-menu-list{height:auto!important;min-height:0!important;overflow:visible!important}.menu-list,.second-level-menu-list{box-sizing:border-box;display:flex!important;flex-wrap:wrap!important;position:static!important}.menu-list{margin:.15em 0!important;padding-left:.7em!important}.second-level-menu{box-sizing:border-box;position:static!important;left:auto!important;top:auto!important;clear:both!important;margin:0 0 .65em!important}.second-level-menu-list{width:100%!important;margin:0!important;padding:0!important}.menu-list li,.second-level-menu-list li{box-sizing:border-box;float:none!important;margin-right:.65em!important;white-space:nowrap}.menu-list li.backLava,.second-level-menu-list li.backLava{display:none!important}.action-link{box-sizing:border-box;clear:both!important;height:auto!important;min-height:2.2em!important;margin:.25em 0 .55em!important}.action-link>div{position:static!important;right:auto!important;top:auto!important;line-height:2em!important;text-align:right!important;white-space:normal!important}#pageContent{clear:both!important}.cf-inline-translate-bar,.cf-inline-submit-row{align-items:stretch;flex-direction:column}.cf-inline-submit-row select{min-width:0;width:100%}.cf-inline-submit-tools button{margin-left:0}.problem-statement{font-size:1em!important}.problem-statement .header .title{font-size:1.35em!important}}@media (max-width:520px){#body{margin-left:5px!important;margin-right:5px!important}#header{box-sizing:border-box;max-width:100%!important;height:auto!important;min-height:0!important}#header img{max-width:100%!important;height:auto}.menu-box{line-height:1.9em!important;padding-top:.4em!important}.menu-list,.second-level-menu-list{gap:2px 0}.menu-list li,.second-level-menu-list li{margin-right:.55em!important}.menu-list li a,.second-level-menu-list li a{font-size:14px!important}.action-link>div{text-align:left!important}.cf-inline-translate-bar{gap:7px;padding:7px}.cf-inline-translate-bar button{width:100%}.cf-inline-translated-statement{padding:.8em!important}.cf-inline-submit-content{padding:10px}.problem-statement .header .title{font-size:1.2em!important}}@media (max-width:380px){body>.cf-inline-too-narrow{box-sizing:border-box;display:flex!important;position:fixed;inset:12px;z-index:2147483647;align-items:center;justify-content:center;flex-direction:column;gap:10px;padding:22px;border:2px solid #b88320;border-radius:8px;background:#fff8df;color:#5f470c;text-align:center;font:15px/1.6 -apple-system,"Segoe UI",sans-serif}body>:not(.cf-inline-too-narrow){display:none!important}}'; document.head.appendChild(style);
+    var practiceStyle=document.createElement('style');practiceStyle.textContent='.cf-inline-title-favorite{display:inline-block!important;margin-left:12px!important;padding:4px 10px!important;border:1px solid #d19a20!important;border-radius:5px!important;background:#fff8dc!important;color:#8b6200!important;font:bold 12px/1.35 Arial,sans-serif!important;vertical-align:middle!important;cursor:pointer!important}.cf-inline-title-favorite:hover,.cf-inline-title-favorite.active{background:#ffeaa0!important;color:#704d00!important}.cf-inline-practice{box-sizing:border-box;margin:0 0 14px;border:1px solid #b8d6f4;border-radius:6px;background:#f8fbff;color:#223;font:13px/1.5 Arial,sans-serif}.cf-inline-practice-heading{display:flex;align-items:center;gap:9px;padding:8px 11px;border-bottom:1px solid #d4e5f5}.cf-inline-practice-heading strong{color:#174f86;font-size:14px}.cf-inline-practice-heading a{color:#276da8;text-decoration:none}.cf-inline-practice-heading button{padding:3px 8px;border:1px solid #94abc0;border-radius:4px;background:#fff;color:#41576a;cursor:pointer}.cf-inline-practice-heading button.active{border-color:#d79a13;background:#fff8dc;color:#986700}.cf-inline-practice-status{margin-left:auto;color:#687786}.cf-inline-practice-body{display:flex;align-items:flex-start;gap:12px;padding:10px 11px}.cf-inline-practice-body label{display:flex;gap:7px;align-items:center;font-weight:bold}.cf-inline-practice-body select{padding:5px;min-width:110px}.cf-inline-note-label{flex:1}.cf-inline-practice-body textarea{box-sizing:border-box;flex:1;min-height:58px;padding:7px;resize:vertical;border:1px solid #aab6c1;border-radius:3px;font:13px/1.45 Arial,sans-serif}@media(max-width:650px){.cf-inline-title-favorite{display:block!important;width:max-content;margin:7px auto 0!important}.cf-inline-practice-heading,.cf-inline-practice-body{align-items:stretch;flex-direction:column}.cf-inline-practice-status{margin-left:0}.cf-inline-practice-body label{align-items:stretch;flex-direction:column}}';document.head.appendChild(practiceStyle);
     var controlledDesktop=document.createElement('style');controlledDesktop.id='cf-inline-controlled-desktop-style';controlledDesktop.textContent=${controlledDesktopStyle};document.head.appendChild(controlledDesktop);
     if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start); else start();
   })();</script>`;

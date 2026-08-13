@@ -6,6 +6,7 @@ import {
   buildLocalizationClientScript,
   LocalizationOptions,
 } from './localization';
+import { CODEFORCES_TAG_ZH, DashboardData, DashboardSummary, ProblemRecord } from './practice';
 
 export interface CfProxyOptions {
   baseUrl: string;
@@ -16,6 +17,13 @@ export interface CfProxyOptions {
   autoTranslateStatements?: boolean;
   writeClipboardText?: (text: string) => Promise<void>;
   enhanceTranslations?: (sources: string[], drafts: string[]) => Promise<string[]>;
+  practice?: {
+    getProblem(contestId: number, index: string): ProblemRecord | undefined;
+    saveProblem(input: Partial<ProblemRecord>): Promise<ProblemRecord>;
+    deleteProblem(contestId: number, index: string): Promise<boolean>;
+    dashboard(): { data: DashboardData; summary: DashboardSummary };
+    sync(handle: string): Promise<{ imported: number; data: DashboardData; summary: DashboardSummary }>;
+  };
 }
 
 export interface CfState {
@@ -70,6 +78,7 @@ export interface CfUpstreamTransport {
   request(request: CfTransportRequest): Promise<CfTransportResponse>;
   translateHtmlItems?(items: string[]): Promise<string[]>;
   submitSolution?(request: CfBrowserSubmissionRequest): Promise<CfTransportResponse>;
+  hasValidLoginCookie?(): Promise<boolean>;
   dispose(): Promise<void>;
   isAlive?(): boolean;
 }
@@ -128,6 +137,7 @@ export class CfProxy extends EventEmitter {
   private loginInProgress = false;
   private loginMessage = '';
   private transport: CfUpstreamTransport | undefined;
+  private loginCookieCheck: Promise<void> | undefined;
   private sessionHealthTimer: NodeJS.Timeout | undefined;
   private readonly staticCache = new Map<string, StaticCacheEntry>();
   private readonly inFlightStaticRequests = new Map<string, Promise<CfTransportResponse>>();
@@ -137,6 +147,8 @@ export class CfProxy extends EventEmitter {
   private readonly localizationOptions: LocalizationOptions;
   private readonly writeClipboardText?: (text: string) => Promise<void>;
   private readonly enhanceTranslations?: (sources: string[], drafts: string[]) => Promise<string[]>;
+  private readonly practice?: CfProxyOptions['practice'];
+  private authenticatedHandle = '';
 
   constructor(options: CfProxyOptions) {
     super();
@@ -151,6 +163,7 @@ export class CfProxy extends EventEmitter {
     };
     this.writeClipboardText = options.writeClipboardText;
     this.enhanceTranslations = options.enhanceTranslations;
+    this.practice = options.practice;
   }
 
   get origin(): string {
@@ -216,6 +229,42 @@ export class CfProxy extends EventEmitter {
     void transport.dispose();
   }
 
+  private confirmBrowserLoginAfterAnonymousPage(transport: CfUpstreamTransport): void {
+    if (this.transport !== transport || this.loginCookieCheck) {
+      return;
+    }
+    if (!transport.hasValidLoginCookie) {
+      this.markAccountLoggedOut(transport);
+      return;
+    }
+    const check = transport.hasValidLoginCookie().then((valid) => {
+      if (this.transport !== transport || valid || transport.isAlive?.() === false) {
+        return;
+      }
+      this.markAccountLoggedOut(transport);
+    }).catch(() => {
+      // A CDP query can fail briefly while Edge replaces a page target. Do not
+      // turn a transient browser operation into a global logout.
+    }).finally(() => {
+      if (this.loginCookieCheck === check) {
+        this.loginCookieCheck = undefined;
+      }
+    });
+    this.loginCookieCheck = check;
+  }
+
+  private markAccountLoggedOut(transport: CfUpstreamTransport): void {
+    if (this.transport !== transport) {
+      return;
+    }
+    this.sessionReady = false;
+    this.jar = new CookieJar();
+    this.loginMessage = 'Codeforces 登录状态已失效，请重新登录。';
+    this.clearPageSnapshots();
+    this.emit('cookieChange');
+    this.emit('sessionChange');
+  }
+
   attachBrowserSession(
     cookies: BrowserCookie[],
     userAgent: string,
@@ -259,6 +308,7 @@ export class CfProxy extends EventEmitter {
     this.jar = nextJar;
     this.upstreamUserAgent = userAgent;
     this.transport = transport;
+    this.loginCookieCheck = undefined;
     this.sessionReady = true;
     this.loginInProgress = false;
     this.loginMessage = '';
@@ -273,6 +323,7 @@ export class CfProxy extends EventEmitter {
   async detachTransport(): Promise<void> {
     const transport = this.transport;
     this.transport = undefined;
+    this.loginCookieCheck = undefined;
     this.sessionReady = false;
     this.jar = new CookieJar();
     this.clearPageSnapshots();
@@ -364,7 +415,7 @@ export class CfProxy extends EventEmitter {
         return;
       }
       if (rawUrl.startsWith('/__cf_inline/')) {
-        this.handleInline(rawUrl, req, res);
+        await this.handleInline(rawUrl, req, res);
         return;
       }
       const localPath = new URL(rawUrl, this.origin).pathname;
@@ -374,6 +425,11 @@ export class CfProxy extends EventEmitter {
           'Content-Type': 'application/javascript; charset=utf-8',
         });
         res.end('// Service workers are disabled inside Codeforces Inline.');
+        return;
+      }
+
+      if (localPath === '/api/user.status') {
+        await this.forwardPublicApi(req, res, new URL(rawUrl, this.baseUrl));
         return;
       }
 
@@ -396,6 +452,28 @@ export class CfProxy extends EventEmitter {
       pathAndQuery = `${parsed.pathname}${parsed.search}${parsed.hash}`;
     }
     return new URL(pathAndQuery, this.baseUrl);
+  }
+
+  private async forwardPublicApi(req: http.IncomingMessage, res: http.ServerResponse, target: URL): Promise<void> {
+    if ((req.method ?? 'GET').toUpperCase() !== 'GET' || !/^\/api\/user\.status$/i.test(target.pathname)) {
+      this.writeJson(res, { status: 'FAILED', comment: '不支持的 Codeforces API 请求' }, 403);
+      return;
+    }
+    try {
+      const transport = this.transport;
+      if (!transport || !this.isSessionReady()) throw new Error('请先连接 Edge 会话');
+      const response = await transport.request({
+        url: target.toString(), method: 'GET', headers: { Accept: 'application/json' }, body: Buffer.alloc(0), priority: 60, timeoutMs: 30_000,
+      });
+      res.writeHead(response.statusCode, {
+        'Cache-Control': 'no-store',
+        'Content-Type': response.headers['content-type'] || 'application/json; charset=utf-8',
+        'Content-Length': String(response.body.length),
+      });
+      res.end(response.body);
+    } catch (err) {
+      this.writeJson(res, { status: 'FAILED', comment: err instanceof Error ? err.message : String(err) }, 502);
+    }
   }
 
   private async forward(
@@ -461,12 +539,15 @@ export class CfProxy extends EventEmitter {
         this.handleTransportResponse(req, res, cached);
         return;
       }
+      const upstreamTarget = new URL(target.toString());
+      if (isDocumentRequest(req) && !isStaticAssetRequest(req, target)) forceCodeforcesDesktopMode(upstreamTarget);
       const transportRequest: CfTransportRequest = {
-        url: target.toString(),
+        url: upstreamTarget.toString(),
         method: req.method ?? 'GET',
         headers,
         body,
         priority: requestPriority(req, target),
+        timeoutMs: isSubmissionPollRequest(req, target) ? 12_000 : undefined,
       };
       if (pageKey) {
         const snapshot = this.pageSnapshots.get(pageKey);
@@ -641,20 +722,32 @@ export class CfProxy extends EventEmitter {
       const isHtml = /text\/html/i.test(contentType);
       if (isHtml) {
         let html = finalBody.toString('utf8');
+        html = removeCodeforcesMobileChrome(html);
         const challenged = isCloudflareChallenge(html, status);
         const authentication = detectAuthenticationState(html, response.finalUrl);
+        if (authentication === 'authenticated') {
+          const handle = extractAuthenticatedHandle(html);
+          if (handle) this.authenticatedHandle = handle;
+        }
+        const backgroundSubmissionPoll = isSubmissionPollRequest(req);
         const wasReady = this.sessionReady;
-        if (challenged) {
-          this.sessionReady = false;
-        } else if (authentication === 'anonymous') {
-          this.sessionReady = false;
-        } else if (
-          authentication === 'authenticated' &&
-          status >= 200 &&
-          status < 400 &&
-          this.upstreamUserAgent
-        ) {
-          this.sessionReady = true;
+        if (!backgroundSubmissionPoll) {
+          // Cloudflare challenges are page-specific and transient. The Edge
+          // transport and signed-in cookie are still valid, so keep the session
+          // connected and let this page show its own verification state.
+          if (!challenged && authentication === 'anonymous') {
+            // A single Codeforces response can temporarily render anonymous
+            // navigation even though Edge still owns a valid signed-in cookie.
+            // Confirm the browser's real cookie before changing global state.
+            this.confirmBrowserLoginAfterAnonymousPage(this.transport!);
+          } else if (!challenged &&
+            authentication === 'authenticated' &&
+            status >= 200 &&
+            status < 400 &&
+            this.upstreamUserAgent
+          ) {
+            this.sessionReady = true;
+          }
         }
         if (wasReady !== this.sessionReady) {
           this.emit('sessionChange');
@@ -682,12 +775,28 @@ export class CfProxy extends EventEmitter {
       res.end(finalBody);
   }
 
-  private handleInline(
+  private async handleInline(
     rawUrl: string,
     req: http.IncomingMessage,
     res: http.ServerResponse
-  ): void {
+  ): Promise<void> {
     const parsed = new URL(rawUrl, this.origin);
+    if (parsed.pathname === '/__cf_inline/dashboard') {
+      this.writeDashboard(res, parsed.searchParams.get('return'), parsed.searchParams.get('path'));
+      return;
+    }
+    if (parsed.pathname === '/__cf_inline/practice/problem') {
+      await this.handlePracticeProblem(parsed, req, res);
+      return;
+    }
+    if (parsed.pathname === '/__cf_inline/dashboard-data') {
+      await this.handleDashboardData(req, res);
+      return;
+    }
+    if (parsed.pathname === '/__cf_inline/submission-status') {
+      await this.handleSubmissionStatus(parsed, req, res);
+      return;
+    }
     if (parsed.pathname === '/__cf_inline/fast') {
       this.writeFastMode(res, parsed.searchParams.get('path'));
       return;
@@ -763,6 +872,104 @@ export class CfProxy extends EventEmitter {
     }
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Not found');
+  }
+
+  private async handlePracticeProblem(
+    parsed: URL,
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    if (!this.practice) {
+      this.writeJson(res, { error: '刷题记录功能不可用' }, 503);
+      return;
+    }
+    const contestId = Number(parsed.searchParams.get('contestId'));
+    const index = parsed.searchParams.get('index')?.trim() ?? '';
+    if (!Number.isInteger(contestId) || contestId <= 0 || !/^[A-Za-z0-9]+$/.test(index)) {
+      this.writeJson(res, { error: '题目标识无效' }, 400);
+      return;
+    }
+    if (req.method === 'GET') {
+      this.writeJson(res, { problem: this.practice.getProblem(contestId, index) ?? null });
+      return;
+    }
+    if (req.method === 'DELETE') {
+      if (req.headers['x-cf-inline'] !== 'practice') {
+        this.writeJson(res, { error: '无效的刷题记录请求' }, 403);
+        return;
+      }
+      try {
+        const deleted = await this.practice.deleteProblem(contestId, index);
+        this.writeJson(res, { deleted });
+      } catch (err) {
+        this.writeJson(res, { error: err instanceof Error ? err.message : String(err) }, 400);
+      }
+      return;
+    }
+    if (req.method !== 'POST' || req.headers['x-cf-inline'] !== 'practice') {
+      this.writeJson(res, { error: '无效的刷题记录请求' }, 403);
+      return;
+    }
+    try {
+      const payload = await readJsonBody(req, 32 * 1024) as Partial<ProblemRecord>;
+      const problem = await this.practice.saveProblem({ ...payload, contestId, index });
+      this.writeJson(res, { problem });
+    } catch (err) {
+      this.writeJson(res, { error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  }
+
+  private async handleDashboardData(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if (!this.practice) {
+      this.writeJson(res, { error: '个人仪表盘功能不可用' }, 503);
+      return;
+    }
+    if (req.method === 'GET') {
+      this.writeJson(res, { ...this.practice.dashboard(), handle: this.authenticatedHandle || undefined });
+      return;
+    }
+    if (req.method !== 'POST' || req.headers['x-cf-inline'] !== 'dashboard-sync') {
+      this.writeJson(res, { error: '无效的同步请求' }, 403);
+      return;
+    }
+    const handle = this.authenticatedHandle;
+    if (!handle) {
+      this.writeJson(res, { error: '未能识别当前 Codeforces 账号，请先打开一个已登录的官网页面' }, 400);
+      return;
+    }
+    try {
+      this.writeJson(res, { ...(await this.practice.sync(handle)), handle });
+    } catch (err) {
+      this.writeJson(res, { error: err instanceof Error ? err.message : String(err) }, 502);
+    }
+  }
+
+  private writeDashboard(
+    res: http.ServerResponse,
+    returnMode: string | null = null,
+    returnPath: string | null = null
+  ): void {
+    const tagTranslationsJson = JSON.stringify(CODEFORCES_TAG_ZH).replace(/</g, '\\u003c');
+    const dashboardReturnHref = returnMode === 'full' && returnPath && isSafeLocalPagePath(returnPath)
+      ? `/__cf_inline/full?path=${encodeURIComponent(returnPath)}`
+      : '/__cf_inline/fast';
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Codeforces 个人刷题仪表盘</title><style>
+:root{color-scheme:light dark;--bg:#f4f7fb;--card:#fff;--line:#dbe2ea;--text:#202630;--muted:#6b7480;--brand:#1976d2;--soft:#eaf3fd;--good:#2e8b57;--warn:#c47b00;--bad:#c0392b;--overlay:rgba(12,18,28,.58)}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}header{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:10px;padding:10px 18px;border-bottom:1px solid var(--line);background:var(--card)}header strong{font-size:17px;color:var(--brand)}button,.button{appearance:none;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--text);padding:7px 12px;font:inherit;cursor:pointer;text-decoration:none}button:hover,.button:hover{background:var(--soft)}#sync{margin-left:auto;border-color:#8bbbe8;color:var(--brand)}main{width:min(1280px,calc(100% - 28px));margin:18px auto 40px}.notice,.scope-note{margin-bottom:14px;color:var(--muted)}.scope-note{margin-top:-5px;font-size:12px}.cards{display:grid;grid-template-columns:repeat(5,minmax(120px,1fr));gap:12px}.card,.panel{border:1px solid var(--line);border-radius:9px;background:var(--card);box-shadow:0 2px 8px rgba(0,0,0,.035)}.card{padding:15px}.card b{display:block;font-size:26px;color:var(--brand)}.card span{color:var(--muted)}.grid{display:grid;grid-template-columns:1.15fr .85fr;gap:14px;margin-top:14px}.panel{padding:16px;min-width:0}.panel h2{margin:0 0 13px;font-size:16px}.chart{display:flex;align-items:flex-end;gap:5px;height:150px;padding-top:8px;border-bottom:1px solid var(--line)}.day{display:flex;flex:1;min-width:0;height:100%;align-items:center;justify-content:flex-end;flex-direction:column;gap:5px}.bar{width:min(26px,75%);min-height:2px;border-radius:4px 4px 0 0;background:#4d9ce5}.day small{font-size:10px;color:var(--muted);white-space:nowrap}.rating-row,.tag-row{display:grid;grid-template-columns:100px 1fr 32px;gap:8px;align-items:center;margin:8px 0}.track{height:9px;overflow:hidden;border-radius:9px;background:#edf1f5}.fill{height:100%;border-radius:9px;background:#5b9fdb}.tag-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 14px}.weak{display:flex;flex-wrap:wrap;gap:7px}.pill{padding:5px 9px;border-radius:99px;background:#fff1dc;color:#8b5500}.status-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.status{padding:10px;border-radius:6px;background:var(--soft);text-align:center}.status b{display:block;font-size:20px}.records{margin-top:14px}.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.filters button.active{border-color:var(--brand);background:var(--soft);color:var(--brand)}table{width:100%;border-collapse:collapse}th,td{padding:9px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600}.problem{color:var(--brand);text-decoration:none;font-weight:600}.empty{padding:30px;text-align:center;color:var(--muted)}.note{max-width:360px;white-space:pre-wrap;overflow-wrap:anywhere}.favorite{color:#e6a100}.delete-record{border-color:#d69b9b;color:var(--bad);padding:4px 8px}.delete-record:disabled{opacity:.6;cursor:wait}.confirm-layer[hidden]{display:none}.confirm-layer{position:fixed;inset:0;z-index:20;display:grid;place-items:center;padding:20px;background:var(--overlay);backdrop-filter:blur(2px)}.confirm-card{width:min(430px,100%);border:1px solid var(--line);border-radius:12px;background:var(--card);box-shadow:0 18px 60px rgba(0,0,0,.35);overflow:hidden}.confirm-body{padding:20px}.confirm-body h3{margin:0 0 8px;font-size:17px}.confirm-body p{margin:0;color:var(--muted);line-height:1.7}.confirm-actions{display:flex;justify-content:flex-end;gap:9px;padding:13px 16px;border-top:1px solid var(--line);background:var(--bg)}.confirm-delete{border-color:#cf6d6d!important;background:#b73535!important;color:#fff!important}.confirm-delete:hover{background:#9f2929!important}@media(max-width:900px){.cards{grid-template-columns:repeat(3,1fr)}.grid{grid-template-columns:1fr}}@media(max-width:600px){main{width:calc(100% - 16px);margin-top:8px}.cards{grid-template-columns:repeat(2,1fr)}.tag-list{grid-template-columns:1fr}.status-grid{grid-template-columns:repeat(2,1fr)}table,thead,tbody,tr,th,td{display:block}thead{display:none}tr{padding:8px 0;border-bottom:1px solid var(--line)}td{border:0;padding:3px 6px}}@media(prefers-color-scheme:dark){:root{--bg:#17191d;--card:#21252a;--line:#3a4048;--text:#e7eaee;--muted:#aab1bb;--brand:#64b5f6;--soft:#18344d;--overlay:rgba(0,0,0,.68)}.track{background:#353a41}.pill{background:#493719;color:#ffd38b}}
+</style></head><body><header><strong>个人刷题仪表盘</strong><a class="button" href="/__cf_inline/fast">返回 Codeforces</a><button id="sync">同步 Codeforces 记录</button></header><main><div class="notice" id="notice">正在读取刷题记录…</div><section class="cards" id="cards"></section><section class="grid"><div class="panel"><h2>最近 14 天每日 AC 题数</h2><div class="chart" id="daily"></div></div><div class="panel"><h2>题目 Rating 分布</h2><div class="scope-note">各档包含“未定级”后合计等于提交明细中的已解决题数，不代表主页官方全部题量。</div><div id="ratings"></div></div><div class="panel"><h2>算法标签覆盖</h2><div class="tag-list" id="tags"></div></div><div class="panel"><h2>需要加强的标签</h2><div class="weak" id="weak"></div><h2 style="margin-top:20px">个人题目状态</h2><div class="status-grid" id="statuses"></div></div></section><section class="panel records"><h2>收藏、稍后完成与个人备注</h2><div class="filters" id="filters"></div><div id="records"></div></section></main><div class="confirm-layer" id="deleteConfirm" hidden><div class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="deleteConfirmTitle"><div class="confirm-body"><h3 id="deleteConfirmTitle">删除这条题目记录？</h3><p>将删除这道题的收藏、状态和个人备注。Codeforces 提交记录不会受到影响。</p></div><div class="confirm-actions"><button id="cancelDelete" type="button">取消</button><button class="confirm-delete" id="confirmDelete" type="button">确认删除</button></div></div></div><script>
+(function(){var payload=null,filter='all',tagTranslations=${tagTranslationsJson};var labels={todo:'待做',doing:'正在做',review:'需要复习',mastered:'已掌握'};function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}function tagZh(v){var key=String(v||'').trim().toLowerCase();return tagTranslations[key]||v}function render(data){payload=data;var s=data.summary,p=data.data,official=Number.isInteger(p.officialSolvedAllTime);document.getElementById('notice').textContent=(data.handle?'当前账号：'+data.handle+(p.lastSyncedAt?' · ':''):'')+(p.lastSyncedAt?'上次同步：'+new Date(p.lastSyncedAt).toLocaleString():'');document.getElementById('cards').innerHTML=[['已解决题目'+(official?'（官方全部）':'（提交明细）'),s.solved],['尝试过（明细）',s.attempted],['WA 次数（明细）',s.wa],['已收藏',s.favorite],['本地记录',p.problems.length]].map(function(x){return'<div class="card"><b>'+x[1]+'</b><span>'+x[0]+'</span></div>'}).join('');var max=Math.max.apply(null,s.daily.map(function(x){return x.count}).concat([1]));document.getElementById('daily').innerHTML=s.daily.map(function(x){return'<div class="day"><span>'+x.count+'</span><div class="bar" style="height:'+Math.max(2,Math.round(x.count/max*105))+'px"></div><small>'+x.date.slice(5)+'</small></div>'}).join('');var ratingMax=Math.max.apply(null,s.ratings.map(function(x){return x.count}).concat([1]));document.getElementById('ratings').innerHTML=s.ratings.map(function(x){return'<div class="rating-row"><span>'+esc(x.label)+'</span><div class="track"><div class="fill" style="width:'+Math.round(x.count/ratingMax*100)+'%"></div></div><b>'+x.count+'</b></div>'}).join('');var tagMax=Math.max.apply(null,s.tags.map(function(x){return x.solved}).concat([1]));document.getElementById('tags').innerHTML=s.tags.length?s.tags.map(function(x){return'<div class="tag-row"><span title="'+esc(x.tag)+'">'+esc(x.tag)+'</span><div class="track"><div class="fill" style="width:'+Math.round(x.solved/tagMax*100)+'%"></div></div><b>'+x.solved+'</b></div>'}).join(''):'<div class="empty">同步提交记录后显示标签覆盖</div>';document.getElementById('weak').innerHTML=s.weakTags.length?s.weakTags.map(function(x){return'<span class="pill">'+esc(x.tag)+' · WA '+x.wa+'/'+x.attempts+'</span>'}).join(''):'<span class="empty">目前没有足够数据判断薄弱标签</span>';document.getElementById('statuses').innerHTML=Object.keys(labels).map(function(k){return'<div class="status"><b>'+s.statusCounts[k]+'</b>'+labels[k]+'</div>'}).join('');renderFilters();renderRecords()}
+function renderFilters(){var list=[['all','全部'],['favorite','已收藏'],['todo','待做'],['doing','正在做'],['review','需要复习'],['mastered','已掌握']];document.getElementById('filters').innerHTML=list.map(function(x){return'<button data-filter="'+x[0]+'" class="'+(filter===x[0]?'active':'')+'">'+x[1]+'</button>'}).join('')}function renderRecords(){var list=payload.data.problems.filter(function(x){return filter==='all'||filter==='favorite'&&x.favorite||x.status===filter});document.getElementById('records').innerHTML=list.length?'<table><thead><tr><th>题目</th><th>状态</th><th>Rating / 标签</th><th>个人备注</th><th>操作</th></tr></thead><tbody>'+list.map(function(x){return'<tr><td>'+(x.favorite?'<span class="favorite">★</span> ':'')+'<a class="problem" href="'+esc(x.url)+'">'+esc(x.contestId+x.index+' · '+(x.name||'未命名题目'))+'</a></td><td>'+esc(labels[x.status]||x.status)+'</td><td>'+(x.rating||'未定级')+(x.tags.length?'<br>'+esc(x.tags.map(tagZh).join('、')):'')+'</td><td class="note">'+esc(x.note||'—')+'</td><td><button class="delete-record" data-contest="'+x.contestId+'" data-index="'+esc(x.index)+'">删除记录</button></td></tr>'}).join('')+'</tbody></table>':'<div class="empty">这里还没有题目。在任意题目页使用“刷题记录”即可添加。</div>'}var pendingDelete=null,deleteLayer=document.getElementById('deleteConfirm'),confirmDelete=document.getElementById('confirmDelete');function closeDeleteConfirm(){deleteLayer.hidden=true;pendingDelete=null;confirmDelete.disabled=false;confirmDelete.textContent='确认删除'}function openDeleteConfirm(button){pendingDelete=button;deleteLayer.hidden=false;document.getElementById('cancelDelete').focus()}async function deleteRecord(){var button=pendingDelete;if(!button)return;confirmDelete.disabled=true;confirmDelete.textContent='正在删除…';try{var r=await fetch('/__cf_inline/practice/problem?contestId='+encodeURIComponent(button.dataset.contest)+'&index='+encodeURIComponent(button.dataset.index),{method:'DELETE',headers:{'X-CF-Inline':'practice'},cache:'no-store'}),d=await r.json();if(!r.ok)throw new Error(d.error||('HTTP '+r.status));closeDeleteConfirm();await load(false)}catch(e){confirmDelete.disabled=false;confirmDelete.textContent='重试删除';document.getElementById('notice').textContent='删除记录失败：'+String(e&&e.message||e)}}async function load(autoSync){var r=await fetch('/__cf_inline/dashboard-data',{cache:'no-store'}),d=await r.json();if(!r.ok)throw new Error(d.error||('HTTP '+r.status));render(d);if(autoSync&&d.handle)await sync(true)}async function sync(auto){var b=document.getElementById('sync'),n=document.getElementById('notice');b.disabled=true;b.textContent='正在同步…';n.textContent=auto?'正在自动同步 Codeforces 记录…':'正在从 Codeforces 公共 API 同步提交记录…';try{var r=await fetch('/__cf_inline/dashboard-data',{method:'POST',headers:{'X-CF-Inline':'dashboard-sync'},cache:'no-store'}),d=await r.json();if(!r.ok)throw new Error(d.error||('HTTP '+r.status));render(d);n.textContent='同步完成，本次新增 '+d.imported+' 条提交记录'}catch(e){n.textContent='同步失败：'+String(e&&e.message||e)+'；本地记录仍可正常使用'}finally{b.disabled=false;b.textContent='同步 Codeforces 记录'}}document.getElementById('filters').addEventListener('click',function(e){var b=e.target.closest('button[data-filter]');if(!b)return;filter=b.dataset.filter;renderFilters();renderRecords()});document.getElementById('records').addEventListener('click',function(e){var b=e.target.closest('button.delete-record');if(b)openDeleteConfirm(b)});document.getElementById('cancelDelete').onclick=closeDeleteConfirm;confirmDelete.onclick=deleteRecord;deleteLayer.addEventListener('click',function(e){if(e.target===deleteLayer)closeDeleteConfirm()});document.addEventListener('keydown',function(e){if(e.key==='Escape'&&!deleteLayer.hidden)closeDeleteConfirm()});document.getElementById('sync').onclick=function(){sync(false)};load(true).catch(function(e){document.getElementById('notice').textContent='仪表盘加载失败：'+String(e&&e.message||e)})})();
+</script></body></html>`;
+    const coloredHtml = html
+      .replace('href="/__cf_inline/fast">返回 Codeforces</a>', `href="${escapeHtml(dashboardReturnHref)}">返回 Codeforces</a>`)
+      .replace('</style>', `.filters button[data-filter="favorite"],.status-label.favorite{--type:#c98200}.filters button[data-filter="todo"],.status-label.todo{--type:#607d8b}.filters button[data-filter="doing"],.status-label.doing{--type:#e07a16}.filters button[data-filter="review"],.status-label.review{--type:#8e5ac7}.filters button[data-filter="mastered"],.status-label.mastered{--type:#258653}.filters button[data-filter]:not([data-filter="all"]){color:var(--type);border-color:color-mix(in srgb,var(--type) 58%,var(--line))}.filters button[data-filter]:not([data-filter="all"]):hover,.filters button[data-filter]:not([data-filter="all"]).active{color:#fff;background:var(--type);border-color:var(--type)}.status-label{display:inline-block;padding:3px 9px;border:1px solid color-mix(in srgb,var(--type) 65%,var(--line));border-radius:99px;background:color-mix(in srgb,var(--type) 12%,transparent);color:var(--type);font-weight:600}</style>`)
+      .replace("<td>'+esc(labels[x.status]||x.status)+'</td>", "<td><span class=\"status-label '+esc(x.status)+'\">'+esc(labels[x.status]||x.status)+'</span></td>");
+    res.writeHead(200, {
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy': "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': String(Buffer.byteLength(coloredHtml)),
+    });
+    res.end(coloredHtml);
   }
 
   private async handleClipboard(
@@ -904,6 +1111,56 @@ export class CfProxy extends EventEmitter {
     }
   }
 
+  private async handleSubmissionStatus(
+    parsed: URL,
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    if (req.method !== 'GET' || req.headers['x-cf-inline'] !== 'submission-status') {
+      this.writeJson(res, { error: '无效的评测状态查询' }, 403);
+      return;
+    }
+    const contestId = parsed.searchParams.get('contestId') ?? '';
+    const index = (parsed.searchParams.get('index') ?? '').toUpperCase();
+    if (!/^\d+$/.test(contestId) || !/^[A-Z0-9]+$/.test(index)) {
+      this.writeJson(res, { error: '题目参数无效' }, 400);
+      return;
+    }
+    if (!this.authenticatedHandle) {
+      this.writeJson(res, { error: '尚未识别当前 Codeforces 账号' }, 409);
+      return;
+    }
+    try {
+      const transport = this.transport;
+      if (!transport || !this.isSessionReady()) throw new Error('Edge 会话未连接');
+      const target = new URL('/api/user.status', this.baseUrl);
+      target.searchParams.set('handle', this.authenticatedHandle);
+      target.searchParams.set('from', '1');
+      target.searchParams.set('count', '50');
+      const response = await transport.request({
+        url: target.toString(), method: 'GET', headers: { Accept: 'application/json' }, body: Buffer.alloc(0), priority: 80, timeoutMs: 20_000,
+      });
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw new Error(`Codeforces API 返回 HTTP ${response.statusCode}`);
+      }
+      const payload = JSON.parse(response.body.toString('utf8')) as {
+        status?: string;
+        comment?: string;
+        result?: Array<Record<string, unknown>>;
+      };
+      if (payload.status !== 'OK' || !Array.isArray(payload.result)) {
+        throw new Error(payload.comment || 'Codeforces API 返回无效数据');
+      }
+      const item = payload.result.find((entry) => {
+        const problem = entry.problem as Record<string, unknown> | undefined;
+        return String(problem?.contestId ?? '') === contestId && String(problem?.index ?? '').toUpperCase() === index;
+      });
+      this.writeJson(res, { submission: item ?? null });
+    } catch (err) {
+      this.writeJson(res, { error: err instanceof Error ? err.message : String(err) }, 502);
+    }
+  }
+
   private writeJson(res: http.ServerResponse, data: unknown, status = 200): void {
     res.writeHead(status, {
       'Cache-Control': 'no-store',
@@ -959,15 +1216,19 @@ export class CfProxy extends EventEmitter {
 <title>Codeforces 极速模式</title>
 <style>
 :root{color-scheme:light dark;--bg:#f5f7fb;--panel:#fff;--line:#d9dee8;--text:#20242b;--muted:#68707d;--brand:#1976d2;--brand-soft:#e8f2fd;--danger:#c62828}*{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden}body{display:flex;flex-direction:column;background:var(--bg);color:var(--text);font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}.progress{height:3px;flex:0 0 3px;background:transparent;overflow:hidden}.progress::after{content:"";display:block;width:35%;height:100%;background:var(--brand);transform:translateX(-110%)}body.loading .progress::after{animation:run 1s ease-in-out infinite}@keyframes run{to{transform:translateX(320%)}}header{display:flex;align-items:center;gap:10px;min-height:54px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);box-shadow:0 1px 4px rgba(0,0,0,.05);z-index:2}.brand{font-weight:700;white-space:nowrap;color:var(--brand)}nav{display:flex;gap:5px;min-width:0}button,.entry{appearance:none;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--text);font:inherit;text-decoration:none;padding:7px 11px;cursor:pointer;white-space:nowrap}.entry:hover,button:hover{background:var(--brand-soft)}.entry.active{color:var(--brand);background:var(--brand-soft);border-color:#b8d7f5}.tools{display:flex;gap:2px;margin-left:auto}.tools button{padding:6px 9px;border-color:var(--line)}.status{display:flex;align-items:center;gap:7px;min-height:30px;padding:5px 13px;color:var(--muted);background:var(--panel);border-bottom:1px solid var(--line);font-size:12px}.dot{width:7px;height:7px;border-radius:50%;background:#43a047;flex:none}.status.error{color:var(--danger)}.status.error .dot{background:var(--danger)}.path{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.loading-text{margin-left:auto;display:none;color:var(--brand)}body.loading .loading-text{display:block}.relogin{display:none;margin-left:auto;padding:3px 9px;border-color:var(--danger);color:var(--danger);font-size:12px}.status.error .relogin{display:block}.relogin:disabled{opacity:.6;cursor:wait}iframe{display:block;flex:1;width:100%;min-height:0;border:0;background:#fff}@media(max-width:660px){.brand{display:none}header{gap:4px;padding-inline:6px}.entry{padding-inline:8px}.tools button{padding-inline:7px}}@media(prefers-color-scheme:dark){:root{--bg:#17191d;--panel:#202328;--line:#373b43;--text:#e6e8eb;--muted:#a4aab3;--brand:#64b5f6;--brand-soft:#18344d}iframe{background:#fff}}
-</style></head><body class="loading"><div class="progress"></div><header><span class="brand">Codeforces 极速模式</span><nav><a class="entry" href="/groups/my" target="cfInlineMain" data-path="/groups/my">我的群组</a><a class="entry" href="/contests" target="cfInlineMain" data-path="/contests">比赛</a><a class="entry" href="/gyms" target="cfInlineMain" data-path="/gyms">训练营</a><a class="entry" href="/problemset" target="cfInlineMain" data-path="/problemset">题库</a></nav><div class="tools"><button id="normalMode" title="保留当前页面并切换到完整 Codeforces 界面">正常模式</button><button id="translationMode" title="选择普通免费翻译或已保存的 AI 翻译配置">翻译模式</button><button id="back" title="后退">←</button><button id="forward" title="前进">→</button><button id="refresh" title="从 Codeforces 刷新当前页面">刷新</button></div></header><div class="status" id="status"><span class="dot"></span><span class="path" id="path">正在连接…</span><span class="loading-text">正在加载 Codeforces…</span><button class="relogin" id="relogin" type="button">重新登录</button></div><iframe id="main" name="cfInlineMain" src="about:blank"></iframe>
+</style></head><body class="loading"><div class="progress"></div><header><span class="brand">Codeforces 极速模式</span><nav><a class="entry" href="/groups/my" target="cfInlineMain" data-path="/groups/my">我的群组</a><a class="entry" href="/contests" target="cfInlineMain" data-path="/contests">比赛</a><a class="entry" href="/gyms" target="cfInlineMain" data-path="/gyms">训练营</a><a class="entry" href="/problemset" target="cfInlineMain" data-path="/problemset">题库</a><a class="entry" href="/__cf_inline/dashboard">仪表盘</a></nav><div class="tools"><button id="normalMode" title="保留当前页面并切换到完整 Codeforces 界面">正常模式</button><button id="translationMode" title="选择普通免费翻译或已保存的 AI 翻译配置">翻译模式</button><button id="back" title="后退">←</button><button id="forward" title="前进">→</button><button id="refresh" title="从 Codeforces 刷新当前页面">刷新</button></div></header><div class="status" id="status"><span class="dot"></span><span class="path" id="path">正在连接…</span><span class="loading-text">正在加载 Codeforces…</span><button class="relogin" id="relogin" type="button">重新登录</button></div><iframe id="main" name="cfInlineMain" src="about:blank"></iframe>
 <script>(function(){var initial=${initialPathJson};var frame=document.getElementById('main');var status=document.getElementById('status');var pathText=document.getElementById('path');var relogin=document.getElementById('relogin');var current=initial;var wasConnected=false;window.addEventListener('contextmenu',function(event){event.preventDefault();event.stopImmediatePropagation()},true);function loading(on,message){document.body.classList.toggle('loading',!!on);if(message)pathText.textContent=message}function rememberPath(){history.replaceState(null,'','/__cf_inline/fast?path='+encodeURIComponent(current))}function prefix(path,root){return path===root||path.indexOf(root+'/')===0}function area(path){if(prefix(path,'/groups')||prefix(path,'/group'))return'/groups/my';if(prefix(path,'/contests')||prefix(path,'/contest'))return'/contests';if(prefix(path,'/gyms')||prefix(path,'/gym'))return'/gyms';if(prefix(path,'/problemset'))return'/problemset';return''}function mark(path){document.querySelectorAll('.entry').forEach(function(link){link.classList.toggle('active',link.getAttribute('data-path')===area(path))})}function navigate(path){current=path||'/groups/my';rememberPath();mark(current);loading(true,'正在加载 '+current+'…');frame.src=current}function switchMode(url,message){loading(true,message);requestAnimationFrame(function(){setTimeout(function(){location.href=url},80)})}function chooseTranslationMode(){fetch('/__cf_inline/translation-mode',{method:'POST',headers:{'X-CF-Inline':'translation-mode'},cache:'no-store'}).catch(function(e){pathText.textContent='无法打开翻译模式选择框：'+String(e)})}function requestRelogin(){relogin.disabled=true;relogin.textContent='登录进行中…';loading(false,'正在打开 Edge 登录页面…');fetch('/__cf_inline/relogin',{method:'POST',headers:{'X-CF-Inline':'relogin'},cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('请求失败');return r.json()}).then(applyState).catch(function(e){relogin.disabled=false;relogin.textContent='重新登录';loading(false,'无法启动登录：'+String(e))})}function applyState(s){var connected=!!s.loggedIn&&!!s.sessionReady;relogin.disabled=!!s.loginInProgress;relogin.textContent=s.loginInProgress?'登录进行中…':'重新登录';if(connected){status.classList.remove('error');if(!wasConnected){wasConnected=true;navigate(current)}return}wasConnected=false;status.classList.add('error');loading(false,s.loginMessage||'Edge 会话已断开，请重新登录并保持 Edge 在后台运行')}document.querySelectorAll('.entry').forEach(function(link){link.addEventListener('click',function(){current=link.getAttribute('data-path')||'/groups/my';rememberPath();mark(current);loading(true,'正在加载 '+current+'…')})});document.getElementById('normalMode').onclick=function(){switchMode('/__cf_inline/full?path='+encodeURIComponent(current),'正在切换到正常模式…')};document.getElementById('translationMode').onclick=chooseTranslationMode;document.getElementById('back').onclick=function(){loading(true,'正在返回上一页…');fetch('/__cf_inline/go?dir=-1',{cache:'no-store'}).then(function(r){return r.json()}).then(function(v){navigate(v.path)}).catch(function(e){loading(false,String(e))})};document.getElementById('forward').onclick=function(){loading(true,'正在前往下一页…');fetch('/__cf_inline/go?dir=1',{cache:'no-store'}).then(function(r){return r.json()}).then(function(v){navigate(v.path)}).catch(function(e){loading(false,String(e))})};document.getElementById('refresh').onclick=function(){loading(true,'正在从 Codeforces 刷新 '+current+'…');fetch('/__cf_inline/fast-refresh?path='+encodeURIComponent(current),{cache:'no-store'}).then(function(){frame.src=current}).catch(function(e){loading(false,String(e))})};relogin.onclick=requestRelogin;window.addEventListener('message',function(event){if(event.origin!==location.origin)return;var data=event.data||{};if(data.__cfInlinePageLoading){loading(true,'正在加载 Codeforces…')}if(data.__cfInlineUrl){current=data.__cfInlineUrl;rememberPath();mark(current);pathText.textContent=current}if(data.__cfInlinePageReady){current=data.path||current;rememberPath();mark(current);status.classList.remove('error');loading(false,current)}if(data.__cfInlinePageError){status.classList.add('error');loading(false,data.message||'Codeforces 会话暂不可用')}});frame.addEventListener('load',function(){if(frame.src!=='about:blank')setTimeout(function(){loading(false,current)},800)});function check(){fetch('/__cf_inline/state',{cache:'no-store'}).then(function(r){return r.json()}).then(applyState).catch(function(){status.classList.add('error');loading(false,'无法连接插件本地服务')})}setInterval(check,1000);mark(initial);navigate(initial);check()})()</script></body></html>`;
+    const navigationHtml = html.replace(
+      "function prefix(path,root){return path===root||path.indexOf(root+'/')===0}",
+      "function prefix(value,root){var path=String(value||'').split(/[?#]/,1)[0].replace(/\\/+$/,'')||'/';return path===root||path.indexOf(root+'/')===0}"
+    );
     res.writeHead(200, {
       'Cache-Control': 'no-store',
       'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-src 'self'; connect-src 'self'; img-src 'self' data:",
       'Content-Type': 'text/html; charset=utf-8',
-      'Content-Length': String(Buffer.byteLength(html)),
+      'Content-Length': String(Buffer.byteLength(navigationHtml)),
     });
-    res.end(html);
+    res.end(navigationHtml);
   }
 
   private writeFullMode(res: http.ServerResponse, requestedPath: string | null): void {
@@ -977,9 +1238,12 @@ export class CfProxy extends EventEmitter {
     const initialPathJson = JSON.stringify(initialPath).replace(/</g, '\\u003c');
     const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Codeforces 正常模式</title><style>:root{color-scheme:light dark;--panel:#fff;--line:#d9dee8;--text:#20242b;--muted:#68707d;--brand:#1976d2;--soft:#e8f2fd;--danger:#c62828}*{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden}body{display:flex;flex-direction:column;background:#f5f7fb;color:var(--text);font:14px -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}.progress{height:3px;flex:0 0 3px;overflow:hidden}.progress:after{content:"";display:block;width:35%;height:100%;background:var(--brand);transform:translateX(-110%)}body.loading .progress:after{animation:run 1s ease-in-out infinite}@keyframes run{to{transform:translateX(320%)}}header{display:flex;align-items:center;gap:8px;min-height:46px;padding:6px 10px;background:var(--panel);border-bottom:1px solid var(--line)}strong{color:var(--brand);white-space:nowrap}.path{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}.loading-text{display:none;color:var(--brand);font-size:12px;white-space:nowrap}body.loading .loading-text{display:inline}button{appearance:none;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--text);padding:6px 10px;font:inherit;cursor:pointer;white-space:nowrap}button:hover{background:var(--soft)}.mode{color:var(--brand);border-color:#b8d7f5}.tools{display:flex;gap:3px;margin-left:auto}.relogin{display:none;border-color:var(--danger);color:var(--danger)}body.disconnected .relogin{display:inline-block}.relogin:disabled{opacity:.6;cursor:wait}iframe{display:block;flex:1;width:100%;min-height:0;border:0;background:#fff}@media(max-width:560px){strong,.path{display:none}header{padding-inline:6px}}@media(prefers-color-scheme:dark){:root{--panel:#202328;--line:#373b43;--text:#e6e8eb;--muted:#a4aab3;--brand:#64b5f6;--soft:#18344d}body{background:#17191d}}</style></head><body class="loading"><div class="progress"></div><header><strong>Codeforces 正常模式</strong><span class="path" id="path">正在加载…</span><span class="loading-text" id="loadingText">正在加载完整 Codeforces 页面…</span><div class="tools"><button class="relogin" id="relogin" type="button">重新登录</button><button class="mode" id="fastMode">切换到极速模式</button><button id="back" title="后退">←</button><button id="forward" title="前进">→</button><button id="refresh">刷新</button></div></header><iframe id="main" name="cfInlineMain" src="about:blank"></iframe><script>(function(){var current=${initialPathJson};var frame=document.getElementById('main');var path=document.getElementById('path');var loadingText=document.getElementById('loadingText');var relogin=document.getElementById('relogin');var wasConnected=true;window.addEventListener('contextmenu',function(event){event.preventDefault();event.stopImmediatePropagation()},true);function loading(on,message){document.body.classList.toggle('loading',!!on);if(message)loadingText.textContent=message}function rememberPath(){history.replaceState(null,'','/__cf_inline/full?path='+encodeURIComponent(current))}function navigate(value){current=value||'/';rememberPath();path.textContent=current;loading(true,'正在加载完整 Codeforces 页面…');frame.src=current}function switchMode(url,message){loading(true,message);requestAnimationFrame(function(){setTimeout(function(){location.href=url},80)})}function requestRelogin(){relogin.disabled=true;relogin.textContent='登录进行中…';path.textContent='正在打开 Edge 登录页面…';fetch('/__cf_inline/relogin',{method:'POST',headers:{'X-CF-Inline':'relogin'},cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('请求失败');return r.json()}).then(applyState).catch(function(e){relogin.disabled=false;relogin.textContent='重新登录';path.textContent='无法启动登录：'+String(e)})}function applyState(s){var connected=!!s.loggedIn&&!!s.sessionReady;document.body.classList.toggle('disconnected',!connected);relogin.disabled=!!s.loginInProgress;relogin.textContent=s.loginInProgress?'登录进行中…':'重新登录';if(connected){if(!wasConnected){wasConnected=true;navigate(current)}return}wasConnected=false;loading(false);path.textContent=s.loginMessage||'Edge 会话已断开，请重新登录'}document.getElementById('fastMode').onclick=function(){switchMode('/__cf_inline/fast?path='+encodeURIComponent(current),'正在切换到极速模式…')};document.getElementById('back').onclick=function(){loading(true,'正在返回上一页…');try{frame.contentWindow.history.back()}catch(e){}};document.getElementById('forward').onclick=function(){loading(true,'正在前往下一页…');try{frame.contentWindow.history.forward()}catch(e){}};document.getElementById('refresh').onclick=function(){loading(true,'正在重新加载完整页面…');try{frame.contentWindow.location.reload()}catch(e){navigate(current)}};relogin.onclick=requestRelogin;window.addEventListener('message',function(event){if(event.origin!==location.origin)return;var data=event.data||{};if(data.__cfInlinePageLoading)loading(true,'正在加载完整 Codeforces 页面…');if(data.__cfInlineUrl){current=data.__cfInlineUrl;rememberPath();path.textContent=current}if(data.__cfInlinePageReady){current=data.path||current;rememberPath();path.textContent=current;loading(false)}if(data.__cfInlinePageError){path.textContent=data.message||'Codeforces 会话暂不可用';loading(false)}});frame.addEventListener('load',function(){if(frame.src!=='about:blank')setTimeout(function(){loading(false)},800)});function check(){fetch('/__cf_inline/state',{cache:'no-store'}).then(function(r){return r.json()}).then(applyState).catch(function(){document.body.classList.add('disconnected');path.textContent='无法连接插件本地服务'})}setInterval(check,1000);navigate(current);check()})()</script></body></html>`;
     const enhancedHtml = html
+      .replace('切换到极速模式</button>', '极速模式</button>')
+      .replace('<span class="path" id="path">正在加载…</span>', '')
+      .replace("var path=document.getElementById('path');", "var path={textContent:''};")
       .replace(
-        '<button class="mode" id="fastMode">切换到极速模式</button>',
-        '<button class="mode" id="fastMode">切换到极速模式</button><button id="translationMode" title="选择普通免费翻译或已保存的 AI 翻译配置">翻译模式</button>'
+        '<button class="mode" id="fastMode">极速模式</button>',
+        '<button class="mode" id="fastMode">极速模式</button><button id="dashboard" title="查看收藏、进度和刷题统计">仪表盘</button><button id="translationMode" title="选择普通免费翻译或已保存的 AI 翻译配置">翻译模式</button>'
       )
       .replace(
         'function requestRelogin(){',
@@ -987,7 +1251,7 @@ export class CfProxy extends EventEmitter {
       )
       .replace(
         "document.getElementById('fastMode').onclick=function(){switchMode('/__cf_inline/fast?path='+encodeURIComponent(current),'正在切换到极速模式…')};",
-        "document.getElementById('fastMode').onclick=function(){switchMode('/__cf_inline/fast?path='+encodeURIComponent(current),'正在切换到极速模式…')};document.getElementById('translationMode').onclick=chooseTranslationMode;"
+        "document.getElementById('fastMode').onclick=function(){switchMode('/__cf_inline/fast?path='+encodeURIComponent(current),'正在切换到极速模式…')};document.getElementById('dashboard').onclick=function(){switchMode('/__cf_inline/dashboard?return=full&path='+encodeURIComponent(current),'正在打开仪表盘…')};document.getElementById('translationMode').onclick=chooseTranslationMode;"
       );
     res.writeHead(200, {
       'Cache-Control': 'no-store',
@@ -1051,6 +1315,18 @@ function isStaticAssetRequest(req: http.IncomingMessage, target: URL): boolean {
   return /\.(?:css|js|mjs|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot)(?:$)/i.test(
     target.pathname
   );
+}
+
+function isDocumentRequest(req: http.IncomingMessage): boolean {
+  const destination = String(req.headers['sec-fetch-dest'] ?? '').toLowerCase();
+  const accept = String(req.headers.accept ?? '').toLowerCase();
+  return (req.method ?? 'GET').toUpperCase() === 'GET' && (destination === 'document' || accept.includes('text/html'));
+}
+
+function isSubmissionPollRequest(req: http.IncomingMessage, target?: URL): boolean {
+  if ((req.method ?? 'GET').toUpperCase() !== 'GET') return false;
+  const url = target ?? new URL(req.url ?? '/', 'http://127.0.0.1');
+  return /^\d+$/.test(url.searchParams.get('cf_inline_poll') ?? '');
 }
 
 function isFastSnapshotRequest(req: http.IncomingMessage, target: URL): boolean {
@@ -1192,6 +1468,17 @@ function isCloudflareChallenge(html: string, status: number): boolean {
 
 function isCodeforcesHost(host: string): boolean {
   return /^(?:m[1-3]\.)?codeforces\.com$/i.test(host);
+}
+
+function forceCodeforcesDesktopMode(url: URL): void {
+  if (!isCodeforcesHost(url.hostname)) return;
+  if (!url.searchParams.has('mobile')) url.searchParams.set('mobile', 'false');
+}
+
+function removeCodeforcesMobileChrome(html: string): string {
+  return html
+    .replace(/<div\b[^>]*class=["'][^"']*\bmobile-toolbar\b[^"']*["'][^>]*>[\s\S]*?<\/div>\s*<\/div>/gi, '')
+    .replace(/<link\b[^>]*href=["'][^"']*\/mobile\.css(?:\?[^"']*)?["'][^>]*>/gi, '');
 }
 
 function isValidUserSha1(value: string): boolean {
@@ -1374,6 +1661,26 @@ function detectAuthenticationState(html: string, finalUrl: string): Authenticati
     return 'authenticated';
   }
   return 'unknown';
+}
+
+function extractAuthenticatedHandle(html: string): string {
+  const matches = [...html.matchAll(/href\s*=\s*["'][^"']*\/profile\/([^"'/?#]+)(?:[?#][^"']*)?["']/gi)];
+  const logoutAt = html.search(/href\s*=\s*["'][^"']*\/logout(?:\?[^"']*)?["']/i);
+  if (!matches.length || logoutAt < 0) return '';
+  const nearest = matches.sort((a, b) => Math.abs((a.index ?? 0) - logoutAt) - Math.abs((b.index ?? 0) - logoutAt))[0];
+  try { return decodeURIComponent(nearest[1]); } catch { return nearest[1]; }
+}
+
+async function readJsonBody(req: http.IncomingMessage, limit: number): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += bytes.length;
+    if (size > limit) throw new Error('请求内容过长');
+    chunks.push(bytes);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
 function isAllowedSubmitPath(value: string): boolean {

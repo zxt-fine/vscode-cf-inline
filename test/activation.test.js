@@ -21,6 +21,7 @@ test('relies on VS Code generated activation events for contributed commands', (
     'cfInline.openIntegratedBrowser',
     'cfInline.openPanel',
     'cfInline.openLogin',
+    'cfInline.openDashboard',
     'cfInline.configureAiTranslation',
     'cfInline.selectTranslationMode',
     'cfInline.setAiApiKey',
@@ -45,6 +46,7 @@ test('registers a native Codeforces activity-bar sidebar without launching Edge'
   assert.match(sidebarSource, /'打开 Codeforces 浏览器'/);
   assert.match(sidebarSource, /'重新连接 Edge'/);
   assert.match(sidebarSource, /'配置 AI 增强翻译'/);
+  assert.match(sidebarSource, /'个人刷题仪表盘'/);
   assert.match(sidebarSource, /'翻译模式'/);
   assert.match(sidebarSource, /'cfInline\.selectTranslationMode'/);
   assert.match(sidebarSource, /普通免费翻译（DeepL 优先）/);

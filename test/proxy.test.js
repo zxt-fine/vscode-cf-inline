@@ -138,9 +138,10 @@ test('forwards GET and POST through the attached Edge transport and rewrites HTM
   await proxy.start();
   t.after(() => proxy.stop());
 
-  const groups = await localRequest(`${proxy.origin}/groups`);
+  const groups = await localRequest(`${proxy.origin}/groups`, { headers: { Accept: 'text/html,application/xhtml+xml' } });
   const groupsHtml = groups.body.toString('utf8');
   assert.equal(groups.statusCode, 200);
+  assert.match(transport.requests[0].url, /[?&]mobile=false(?:&|$)/);
   assert.match(groupsHtml, new RegExp(`${proxy.origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/gyms`));
   assert.match(groupsHtml, /"Groups":"群组"/);
   assert.match(groupsHtml, /autoTranslateStatements=true/);
@@ -194,6 +195,68 @@ test('forwards GET and POST through the attached Edge transport and rewrites HTM
   assert.equal(transport.requests[1].headers.referer, undefined);
 });
 
+test('forces desktop Codeforces documents and removes a stale mobile toolbar', async (t) => {
+  const mobile = '<!doctype html><html><head><link rel="stylesheet" href="https://codeforces.org/s/1/css/mobile.css"></head><body><div class="mobile-toolbar"><div class="mobile-toolbar-internals"><img class="mobile-toolbar-menu"><img class="mobile-toolbar-sidebar"></div></div><div id="body"><div class="menu-box">Desktop navigation</div><main>Problem</main></div></body></html>';
+  const transport = new FakeTransport((request) => response(mobile, request.url));
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/problemset', port: 0 });
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+  const page = await localRequest(`${proxy.origin}/problemset`, { headers: { Accept: 'text/html,application/xhtml+xml' } });
+  const html = page.body.toString('utf8');
+  assert.match(transport.requests[0].url, /[?&]mobile=false(?:&|$)/);
+  assert.doesNotMatch(html.slice(0, html.indexOf('<script>')), /mobile-toolbar|\/mobile\.css/);
+  assert.match(html, /Desktop navigation/);
+});
+
+test('stores problem practice data and serves the personal dashboard locally', async (t) => {
+  let saved;
+  const proxy = new CfProxy({
+    baseUrl: 'https://codeforces.com', defaultPath: '/problemset/problem/4/A', port: 0,
+    practice: {
+      getProblem: (contestId, index) => saved && saved.contestId === contestId && saved.index === index ? saved : undefined,
+      saveProblem: async (value) => (saved = { ...value, key: '4:A', updatedAt: Date.now() }),
+      deleteProblem: async (contestId, index) => {
+        const deleted = !!saved && saved.contestId === contestId && saved.index === index;
+        if (deleted) saved = undefined;
+        return deleted;
+      },
+      dashboard: () => ({ data: { problems: saved ? [saved] : [], submissions: [] }, summary: { solved: 0, solvedFromDetails: 0, attempted: 0, wa: 0, favorite: saved?.favorite ? 1 : 0, statusCounts: { todo: 0, doing: 0, review: 1, mastered: 0 }, daily: [], ratings: [], tags: [], weakTags: [] } }),
+      sync: async () => { throw new Error('not used'); },
+    },
+  });
+  await proxy.start();
+  t.after(() => proxy.stop());
+  const body = Buffer.from(JSON.stringify({ name: 'Watermelon', url: '/problemset/problem/4/A', favorite: true, status: 'review', note: '边界', tags: ['math'] }));
+  const stored = await localRequest(`${proxy.origin}/__cf_inline/practice/problem?contestId=4&index=A`, { method: 'POST', headers: { 'X-CF-Inline': 'practice', 'Content-Type': 'application/json', 'Content-Length': String(body.length) }, body });
+  assert.equal(stored.statusCode, 200);
+  assert.equal(JSON.parse(stored.body).problem.note, '边界');
+  const restored = await localRequest(`${proxy.origin}/__cf_inline/practice/problem?contestId=4&index=A`);
+  assert.equal(JSON.parse(restored.body).problem.favorite, true);
+  const dashboard = await localRequest(`${proxy.origin}/__cf_inline/dashboard`);
+  assert.equal(dashboard.statusCode, 200);
+  assert.match(dashboard.body.toString('utf8'), /个人刷题仪表盘/);
+  assert.doesNotMatch(dashboard.body.toString('utf8'), /全部题量采用 Codeforces 主页官方统计/);
+  assert.match(dashboard.body.toString('utf8'), /load\(true\)/);
+  assert.match(dashboard.body.toString('utf8'), /autoSync&&d\.handle/);
+  assert.match(dashboard.body.toString('utf8'), /删除记录/);
+  assert.match(dashboard.body.toString('utf8'), /confirm-layer/);
+  assert.match(dashboard.body.toString('utf8'), /确认删除/);
+  assert.doesNotMatch(dashboard.body.toString('utf8'), /\bconfirm\(/);
+  assert.match(dashboard.body.toString('utf8'), /未定级/);
+  assert.match(dashboard.body.toString('utf8'), /动态规划/);
+  assert.match(dashboard.body.toString('utf8'), /data-filter="doing"/);
+  assert.match(dashboard.body.toString('utf8'), /--type:#e07a16/);
+  assert.match(dashboard.body.toString('utf8'), /status-label/);
+  const fullDashboard = await localRequest(`${proxy.origin}/__cf_inline/dashboard?return=full&path=${encodeURIComponent('/contests?mobile=false')}`);
+  assert.match(fullDashboard.body.toString('utf8'), /\/__cf_inline\/full\?path=%2Fcontests%3Fmobile%3Dfalse/);
+  const removed = await localRequest(`${proxy.origin}/__cf_inline/practice/problem?contestId=4&index=A`, { method: 'DELETE', headers: { 'X-CF-Inline': 'practice' } });
+  assert.equal(removed.statusCode, 200);
+  assert.equal(JSON.parse(removed.body).deleted, true);
+  const afterDelete = await localRequest(`${proxy.origin}/__cf_inline/practice/problem?contestId=4&index=A`);
+  assert.equal(JSON.parse(afterDelete.body).problem, null);
+});
+
 test('deduplicates and caches static assets while prioritizing page documents', async (t) => {
   const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/', port: 0 });
   const transport = new FakeTransport(async (request) => {
@@ -228,7 +291,7 @@ test('deduplicates and caches static assets while prioritizing page documents', 
   assert.equal(transport.requests[0].priority, 10);
 
   await localRequest(`${proxy.origin}/`, { headers: { Accept: 'text/html,application/xhtml+xml' } });
-  const documentRequest = transport.requests.find((item) => item.url === 'https://codeforces.com/');
+  const documentRequest = transport.requests.find((item) => item.url.startsWith('https://codeforces.com/?'));
   assert.equal(documentRequest.priority, 100);
 });
 
@@ -259,6 +322,8 @@ test('serves a lightweight fast-mode shell with only the four primary entries', 
   assert.match(html, /id="relogin"/);
   assert.match(html, /__cf_inline\/relogin/);
   assert.match(html, /loginInProgress/);
+  assert.match(html, /function prefix\(value,root\)/);
+  assert.match(html, /split\(\/\[\?\#\]\//);
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)].map((match) => match[1]);
   assert.ok(scripts.length > 0);
   for (const script of scripts) {
@@ -277,8 +342,12 @@ test('serves the complete-site interface and lets users return to fast mode', as
   const html = result.body.toString('utf8');
   assert.equal(result.statusCode, 200);
   assert.match(html, /Codeforces 正常模式/);
-  assert.match(html, /切换到极速模式/);
+  assert.match(html, />极速模式<\/button>/);
+  assert.doesNotMatch(html, />切换到极速模式<\/button>/);
   assert.match(html, /id="translationMode"/);
+  assert.match(html, /id="dashboard"/);
+  assert.match(html, /__cf_inline\/dashboard\?return=full/);
+  assert.doesNotMatch(html, /class="path" id="path"/);
   assert.match(html, /翻译模式/);
   assert.match(html, /__cf_inline\/translation-mode/);
   assert.match(html, /正在切换到极速模式/);
@@ -588,7 +657,38 @@ test('routes protected submissions through the official Edge page transport', as
   assert.equal(transport.submissions[0].source, 'int main() { return 0; }');
 });
 
-test('marks a live session unavailable when Cloudflare challenge returns', async (t) => {
+test('protects the submission status fallback endpoint', async (t) => {
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/', port: 0 });
+  await proxy.start();
+  t.after(() => proxy.stop());
+  const rejected = await localRequest(`${proxy.origin}/__cf_inline/submission-status?contestId=1&index=A`);
+  assert.equal(rejected.statusCode, 403);
+});
+
+test('finds the latest matching submission through the account status fallback', async (t) => {
+  const transport = new FakeTransport((request) => {
+    if (request.url.includes('/api/user.status')) {
+      return response(JSON.stringify({ status: 'OK', result: [
+        { id: 103, verdict: 'TESTING', problem: { contestId: 1, index: 'A' } },
+        { id: 102, verdict: 'OK', problem: { contestId: 1, index: 'B' } },
+      ] }), request.url);
+    }
+    return response('<nav><a href="/profile/tester">tester</a><a href="/logout">Logout</a></nav>', request.url);
+  });
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/contest/1/problem/A', port: 0 });
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+  await localRequest(`${proxy.origin}/contest/1/problem/A`);
+
+  const result = await localRequest(`${proxy.origin}/__cf_inline/submission-status?contestId=1&index=A`, {
+    headers: { 'X-CF-Inline': 'submission-status' },
+  });
+  assert.equal(result.statusCode, 200);
+  assert.equal(JSON.parse(result.body.toString('utf8')).submission.id, 103);
+});
+
+test('keeps the Edge session connected when one visible page hits Cloudflare', async (t) => {
   const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/groups', port: 0 });
   const transport = new FakeTransport(() => response(
     '<!doctype html><html><head><title>Just a moment...</title></head><body><script src="/cdn-cgi/challenge-platform/x"></script></body></html>',
@@ -602,7 +702,42 @@ test('marks a live session unavailable when Cloudflare challenge returns', async
   const result = await localRequest(`${proxy.origin}/groups`);
   assert.equal(result.statusCode, 403);
   assert.equal(proxy.state().loggedIn, true);
-  assert.equal(proxy.state().sessionReady, false);
+  assert.equal(proxy.state().sessionReady, true);
+});
+
+test('keeps the session connected when a background verdict poll hits Cloudflare', async (t) => {
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/contest/1/problem/A', port: 0 });
+  const transport = new FakeTransport((request) => {
+    assert.equal(request.timeoutMs, 12_000);
+    return response(
+      '<!doctype html><html><head><title>Just a moment...</title></head><body><script src="/cdn-cgi/challenge-platform/x"></script></body></html>',
+      request.url,
+      403
+    );
+  });
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+
+  const poll = await localRequest(`${proxy.origin}/contest/1/my?cf_inline_poll=${Date.now()}`);
+  assert.equal(poll.statusCode, 403);
+  assert.equal(proxy.state().sessionReady, true);
+  assert.equal(proxy.state().loggedIn, true);
+});
+
+test('does not let a background verdict poll alone invalidate authentication', async (t) => {
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/contest/1/problem/A', port: 0 });
+  const transport = new FakeTransport(() => response(
+    '<!doctype html><html><body><form id="enterForm"></form></body></html>',
+    'https://codeforces.com/enter?back=%2Fcontest%2F1%2Fmy'
+  ));
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+
+  await localRequest(`${proxy.origin}/contest/1/my?cf_inline_poll=${Date.now()}`);
+  assert.equal(proxy.state().sessionReady, true);
+  assert.equal(proxy.state().loggedIn, true);
 });
 
 test('rejects an imported session without a valid Codeforces account cookie', () => {
@@ -690,16 +825,37 @@ test('marks a stale-cookie session disconnected when Codeforces renders anonymou
     <nav><a href="/enter?back=%2Fgroups%2Fmy">Enter</a><a href="/register">Register</a></nav>
     <main>Public groups remain visible</main>
   </body></html>`, 'https://codeforces.com/groups'));
+  transport.hasValidLoginCookie = async () => false;
   proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
   await proxy.start();
   t.after(() => proxy.stop());
 
   const page = await localRequest(`${proxy.origin}/groups/my`);
   assert.equal(page.statusCode, 200);
-  assert.equal(proxy.state().loggedIn, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(proxy.state().loggedIn, false);
   assert.equal(proxy.state().sessionReady, false);
   assert.match(page.body.toString('utf8'), /__cfInlinePageReady/);
   assert.match(page.body.toString('utf8'), /__cfInlinePageLoading/);
+  assert.match(page.body.toString('utf8'), /authentication: "anonymous"/);
+});
+
+test('keeps the Edge session connected when one anonymous page still has a valid browser login cookie', async (t) => {
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/groups/my', port: 0 });
+  const transport = new FakeTransport(() => response(`<!doctype html><html><body>
+    <nav><a href="/enter?back=%2Fgroups%2Fmy">Enter</a><a href="/register">Register</a></nav>
+    <main>Temporarily anonymous page</main>
+  </body></html>`, 'https://codeforces.com/groups'));
+  transport.hasValidLoginCookie = async () => true;
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+
+  const page = await localRequest(`${proxy.origin}/groups/my`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(page.statusCode, 200);
+  assert.equal(proxy.state().loggedIn, true);
+  assert.equal(proxy.state().sessionReady, true);
   assert.match(page.body.toString('utf8'), /authentication: "anonymous"/);
 });
 

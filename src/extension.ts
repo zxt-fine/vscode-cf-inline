@@ -17,6 +17,7 @@ import { prefersIntegratedBrowser, openInIntegratedBrowser } from './integrated-
 import { CfPanel } from './panel';
 import { CfProxy } from './proxy';
 import { registerCfSidebar } from './sidebar';
+import { parseOfficialSolvedAllTime, PracticeStore, summarizeDashboard } from './practice';
 
 let proxy: CfProxy | undefined;
 const AI_API_KEY_SECRET = 'cfInline.aiApiKey';
@@ -245,6 +246,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const configuredPath = config.get<string>('defaultPath') ?? '/';
   let lastAiWarning = '';
   let lastAiWarningAt = 0;
+  const practiceStore = new PracticeStore(context.globalState);
   proxy = new CfProxy({
     baseUrl: 'https://codeforces.com',
     // Migrate the former default to the account-specific group list on upgrade.
@@ -273,6 +275,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         return drafts;
       }
+    },
+    practice: {
+      getProblem: (contestId, index) => practiceStore.getProblem(contestId, index),
+      saveProblem: (input) => practiceStore.saveProblem(input),
+      deleteProblem: (contestId, index) => practiceStore.deleteProblem(contestId, index),
+      dashboard: () => {
+        const data = practiceStore.snapshot();
+        return { data, summary: summarizeDashboard(data) };
+      },
+      sync: async (handle) => {
+        const [response, profileResult] = await Promise.all([
+          fetch(`${proxy!.origin}/api/user.status?handle=${encodeURIComponent(handle)}&from=1&count=10000`, { signal: AbortSignal.timeout(35_000) }),
+          fetch(`${proxy!.origin}/profile/${encodeURIComponent(handle)}`, {
+            headers: { Accept: 'text/html,application/xhtml+xml' },
+            signal: AbortSignal.timeout(35_000),
+          }).then(async (profileResponse) => profileResponse.ok ? parseOfficialSolvedAllTime(await profileResponse.text()) : undefined)
+            .catch(() => undefined),
+        ]);
+        if (!response.ok) {
+          throw new Error(`Codeforces API 返回 HTTP ${response.status}`);
+        }
+        const payload = await response.json() as { status?: string; comment?: string; result?: unknown };
+        if (payload.status !== 'OK' || !Array.isArray(payload.result)) {
+          throw new Error(payload.comment || 'Codeforces API 返回的数据无效');
+        }
+        const imported = await practiceStore.importSubmissions(handle, payload.result, profileResult);
+        const data = practiceStore.snapshot();
+        return { imported, data, summary: summarizeDashboard(data) };
+      },
     },
   });
   await proxy.start();
@@ -336,6 +367,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand('cfInline.openLogin', () => {
       CfPanel.createOrShow(context, proxy!);
+    }),
+    vscode.commands.registerCommand('cfInline.openDashboard', async () => {
+      await vscode.commands.executeCommand('simpleBrowser.show', `${proxy!.origin}/__cf_inline/dashboard`);
     }),
     vscode.commands.registerCommand('cfInline.selectTranslationMode', async () => {
       await selectTranslationMode(context);

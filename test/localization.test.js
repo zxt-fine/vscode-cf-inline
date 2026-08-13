@@ -6,6 +6,7 @@ const {
   buildPageZoomClientScript,
   CONTROLLED_CODEFORCES_DESKTOP_CSS,
   isUsefulChineseTranslation,
+  formatCodeforcesLimitLabel,
   parseGoogleTranslationResponse,
   parseBingTranslationResponse,
   parseDeepLTranslationResponse,
@@ -43,6 +44,20 @@ test('rejects unchanged long English text while allowing Chinese and short techn
   ), false);
 });
 
+test('rejects untranslated Russian prose from the Chinese translation area', () => {
+  const russian = 'Это сложная версия задачи. Отличие между версиями заключается в ограничениях и требуется вычислить сумму всех подпоследовательностей.';
+  assert.equal(isUsefulChineseTranslation(russian, russian), false);
+  assert.equal(isUsefulChineseTranslation(russian, '这是困难版本 задачи. Отличие между версиями заключается в ограничениях и требуется вычислить сумму.'), false);
+  assert.equal(isUsefulChineseTranslation(russian, '这是该题的困难版本。两个版本的区别在于限制条件，本题需要计算所有子序列的得分之和。'), true);
+});
+
+test('formats English and Russian Codeforces time and memory limits completely', () => {
+  assert.equal(formatCodeforcesLimitLabel('time', 'time limit per test 2 seconds'), '每个测试点的时间限制：2 秒');
+  assert.equal(formatCodeforcesLimitLabel('time', 'ограничение по времени на тест: 3 секунды'), '每个测试点的时间限制：3 秒');
+  assert.equal(formatCodeforcesLimitLabel('memory', 'memory limit per test 256 megabytes'), '每个测试点的内存限制：256 兆字节');
+  assert.equal(formatCodeforcesLimitLabel('memory', 'ограничение по памяти на тест: 256 мегабайт'), '每个测试点的内存限制：256 兆字节');
+});
+
 test('supports persistent Ctrl+wheel page zoom and Ctrl+0 reset', () => {
   const script = buildPageZoomClientScript();
   assert.match(script, /cf-inline-page-zoom/);
@@ -72,6 +87,11 @@ test('builds independent Chinese UI localization and protected statement transla
     autoTranslateStatements: false,
   });
   assert.match(script, /"Groups":"群组"/);
+  assert.match(script, /"ГЛАВНАЯ":"主页"/);
+  assert.match(script, /"ВИРТУАЛЬНОЕ УЧАСТИЕ":"虚拟参赛"/);
+  assert.match(script, /"подготовил":"出题人"/);
+  assert.match(script, /prefixDictionary/);
+  assert.match(script, /normalized\.slice\(prefix\.length\)/);
   assert.match(script, /"Accepted":"通过"/);
   assert.match(script, /var autoTranslateStatements=false/);
   assert.doesNotMatch(script, /data-cfi-protected|CFIPROTECTED/);
@@ -79,12 +99,12 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.doesNotMatch(script, /protectedSelector='[^']*tex-font-style/);
   assert.doesNotMatch(script, /statement\.innerHTML=/);
   assert.match(script, /cf-inline-translated-wrap/);
-  assert.match(script, /英文原题保持不变/);
+  assert.match(script, /原题保持不变/);
   assert.match(script, /installGlobalParagraphTranslators/);
   assert.match(script, /cf-inline-paragraph-control/);
   assert.match(script, /cf-inline-paragraph-translation/);
   assert.match(script, /翻译整段/);
-  assert.match(script, /合并翻译这组连续内容，英文原文保持不变/);
+  assert.match(script, /合并翻译这组连续内容，原文保持不变/);
   assert.match(script, /block\.closest\('a\[href\]'\)\|\|block/);
   assert.match(script, /event\.preventDefault\(\);event\.stopPropagation\(\)/);
   assert.match(script, /placement\.parentNode\.insertBefore\(toolbar,placement\)/);
@@ -92,6 +112,22 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /closest\('\.problem-statement/);
   assert.match(script, /installSubmitFormRepair/);
   assert.match(script, /installInlineSubmitter/);
+  assert.match(script, /cf-inline-title-favorite/);
+  assert.match(script, /\.cf-inline-paragraph-translation,.cf-inline-title-favorite/);
+  assert.match(script, /function restoreTranslatedHeader/);
+  assert.match(script, /originalFavorite\.cloneNode\(true\)/);
+  assert.match(script, /originalFavorite\.click\(\)/);
+  assert.match(script, /formatLimitLabel/);
+  assert.match(script, /restoreTranslatedHeader\(statement,translatedStatement\)/);
+  assert.match(script, /recordExists=false;select\.disabled=true/);
+  assert.doesNotMatch(script, /select\.onclick=/);
+  assert.match(script, /<option value="" selected disabled>请选择状态<\/option>/);
+  assert.match(script, /select\.value=recordExists\?\(model\.status\|\|'todo'\):''/);
+  assert.match(script, /recordExists=!!result\.problem/);
+  assert.match(script, /☆ 收藏题目/);
+  assert.match(script, /titleFavorite\.onclick=toggleFavorite/);
+  assert.match(script, /function cleanPracticeText/);
+  assert.doesNotMatch(script, /title=clean\(/);
   assert.match(script, /installSampleCopyButtons/);
   assert.match(script, /cf-inline-sample-copy/);
   assert.match(script, /cfInlineSampleCopyHandler/);
@@ -123,7 +159,7 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /fragmentFallback/);
   assert.match(script, /fragmentTranslations/);
   assert.match(script, /incompleteFragments/);
-  assert.match(script, /在线翻译仍返回英文原文/);
+  assert.match(script, /在线翻译仍包含大量未翻译的英文或俄文/);
   assert.match(script, /function translatePrepared/);
   assert.match(script, /attempt<3/);
   assert.match(script, /statementTranslationCache/);
@@ -150,6 +186,11 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /integerRange/);
   assert.match(script, /preserveBold/);
   assert.match(script, /strong,b,.tex-font-style-bf/);
+  assert.match(script, /sourceCyrillic/);
+  assert.match(script, /translatedCyrillic/);
+  assert.match(script, /sourceForeignWords/);
+  assert.match(script, /isEligibleForeignParagraph/);
+  assert.doesNotMatch(script, /if\(\/\[A-Za-z\]\{2\}\/\.test\(block\.textContent/);
   assert.match(script, /这是该题的/);
   assert.match(script, /只有解决本题的所有版本后/);
   assert.match(script, /Promise\.all\(\[worker\(\),worker\(\),worker\(\),worker\(\),worker\(\),worker\(\)\]\)/);
@@ -165,6 +206,12 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /parseSubmissionRows/);
   assert.match(script, /status-verdict-cell/);
   assert.match(script, /cf_inline_poll/);
+  assert.match(script, /__cf_inline\/submission-status/);
+  assert.match(script, /X-CF-Inline':'submission-status/);
+  assert.match(script, /readLatestSubmissionApi/);
+  assert.match(script, /parseSubmissionRows\(String\(response\.html\|\|''\),route\)/);
+  assert.match(script, /new AbortController\(\)/);
+  assert.match(script, /controller\.abort\(\)/);
   assert.match(script, /正在等待评测结果/);
   assert.doesNotMatch(script, /查看提交详情/);
   assert.doesNotMatch(script, /is-verdict-failed/);

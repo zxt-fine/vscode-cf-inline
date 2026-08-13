@@ -2,7 +2,7 @@
   "name": "vscode-cf-inline",
   "displayName": "Codeforces Inline",
   "description": "在 VS Code 集成浏览器中保留 Codeforces 原文并生成独立中文译文。",
-  "version": "0.10.9",
+  "version": "0.10.32",
   "publisher": "codex-local",
   "author": "zxt-fine",
   "license": "MIT",
@@ -45,6 +45,10 @@
       {
         "command": "cfInline.openLogin",
         "title": "Codeforces Inline: 登录并连接 Edge 会话"
+      },
+      {
+        "command": "cfInline.openDashboard",
+        "title": "Codeforces Inline: 打开个人刷题仪表盘"
       },
       {
         "command": "cfInline.configureAiTranslation",
@@ -129,7 +133,7 @@
         "cfInline.autoTranslateStatements": {
           "type": "boolean",
           "default": true,
-          "description": "自动在英文原题下方生成简体中文译文，并保护代码、公式、图片和样例。"
+          "description": "自动在英文或俄文原题下方生成简体中文译文，并保护代码、公式、图片和样例。"
         },
         "cfInline.aiTranslationEnabled": {
           "type": "boolean",
