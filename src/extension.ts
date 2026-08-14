@@ -20,7 +20,29 @@ import { registerCfSidebar } from './sidebar';
 import { parseOfficialSolvedAllTime, PracticeStore, summarizeDashboard } from './practice';
 
 let proxy: CfProxy | undefined;
+let edgeBridge: EdgeBridgeServer | undefined;
+let shutdownPromise: Promise<void> | undefined;
 const AI_API_KEY_SECRET = 'cfInline.aiApiKey';
+
+async function shutdown(): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
+  const previousProxy = proxy;
+  const previousBridge = edgeBridge;
+  proxy = undefined;
+  edgeBridge = undefined;
+  CfPanel.disposeCurrent();
+  shutdownPromise = (async () => {
+    await Promise.allSettled([
+      previousProxy?.stop(),
+      previousBridge?.shutdown(),
+    ]);
+  })();
+  try {
+    await shutdownPromise;
+  } finally {
+    shutdownPromise = undefined;
+  }
+}
 
 interface TranslationModeQuickPickItem extends vscode.QuickPickItem {
   value: 'standard' | 'profile' | 'add';
@@ -241,6 +263,10 @@ async function readAiOptions(context: vscode.ExtensionContext): Promise<AiTransl
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  // VS Code can reactivate the same extension module after an extension
+  // restart. Wait for every resource from the preceding run to close before
+  // creating a new proxy or bridge, so no stale page/session can survive.
+  await shutdown();
   const config = vscode.workspace.getConfiguration('cfInline');
   await loadAiProfiles(context);
   const configuredPath = config.get<string>('defaultPath') ?? '/';
@@ -312,9 +338,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // navigate it to the newly started server. This never creates a page when
   // the user had closed the Codeforces tab, and it never launches Edge.
   await restoreIntegratedBrowserIfOpen(proxy).catch(() => undefined);
-  const edgeBridge = new EdgeBridgeServer();
-  await edgeBridge.start();
-  context.subscriptions.push(edgeBridge);
+  const activeBridge = new EdgeBridgeServer();
+  edgeBridge = activeBridge;
+  await activeBridge.start();
 
   // Versions before 0.2 stored only cookies and then incorrectly presented
   // them as a reusable Cloudflare session. Remove that stale marker once;
@@ -324,9 +350,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const handleReloginRequest = (): void => {
     const activeProxy = proxy!;
     activeProxy.setLoginProgress(true, '正在连接 Edge 会话…');
-    void loginWithEdgeBridge(edgeBridge, activeProxy, (message) => {
+    void loginWithEdgeBridge(activeBridge, activeProxy, (message) => {
       activeProxy.setLoginProgress(true, message);
-    }).then(
+    }, true, true).then(
       () => {
         activeProxy.setLoginProgress(false, '登录完成，正在恢复当前页面…');
       },
@@ -342,18 +368,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   proxy.on('reloginRequest', handleReloginRequest);
   proxy.on('translationModeRequest', handleTranslationModeRequest);
-  edgeBridge.on('disconnect', () => proxy?.notifyTransportClosed());
-  edgeBridge.on('connect', () => {
-    if (!proxy?.isSessionReady()) void restoreEdgeBridgeSession(edgeBridge, proxy!);
+  activeBridge.on('connect', () => {
+    if (!proxy?.isSessionReady()) void restoreEdgeBridgeSession(activeBridge, proxy!);
   });
-  edgeBridge.on('session', () => {
-    if (!proxy?.isSessionReady() && edgeBridge.sessionSnapshot) void restoreEdgeBridgeSession(edgeBridge, proxy!);
+  activeBridge.on('session', () => {
+    if (!proxy?.isSessionReady() && activeBridge.sessionSnapshot) void restoreEdgeBridgeSession(activeBridge, proxy!);
   });
-  edgeBridge.on('incompatible', (message: string) => {
+  activeBridge.on('incompatible', (message: string) => {
     // Keep protocol diagnostics in the extension UI. VS Code notifications
     // cannot be recalled if a newer connection succeeds moments later, so a
     // transient or stale bridge must never leave an incorrect popup behind.
-    if (edgeBridge.connected || proxy?.isSessionReady()) return;
+    if (activeBridge.connected || proxy?.isSessionReady()) return;
     proxy?.setLoginProgress(false, message);
   });
 
@@ -371,12 +396,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       // The first visible step is always the extension login page. Edge is
       // launched only after the user presses its login button.
-      CfPanel.createOrShow(context, proxy!, edgeBridge);
+      CfPanel.createOrShow(context, proxy!, activeBridge);
     }),
     vscode.commands.registerCommand('cfInline.openIntegratedBrowser', async () => {
       try {
         if (!proxy!.isLoggedIn() || !proxy!.isSessionReady()) {
-          CfPanel.createOrShow(context, proxy!, edgeBridge);
+          CfPanel.createOrShow(context, proxy!, activeBridge);
           return;
         }
         await openInIntegratedBrowser(proxy!);
@@ -385,10 +410,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.commands.registerCommand('cfInline.openPanel', () => {
-      CfPanel.createOrShow(context, proxy!, edgeBridge, false);
+      CfPanel.createOrShow(context, proxy!, activeBridge, false);
     }),
     vscode.commands.registerCommand('cfInline.openLogin', () => {
-      CfPanel.createOrShow(context, proxy!, edgeBridge);
+      CfPanel.createOrShow(context, proxy!, activeBridge);
     }),
     vscode.commands.registerCommand('cfInline.installEdgeExtension', () => revealEdgeExtension(context)),
     vscode.commands.registerCommand('cfInline.openDashboard', async () => {
@@ -554,7 +579,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       dispose: () => {
         proxy?.off('reloginRequest', handleReloginRequest);
         proxy?.off('translationModeRequest', handleTranslationModeRequest);
-        void proxy?.stop();
+        void shutdown();
       },
     }
   );
@@ -567,6 +592,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // reconnect itself, but visible login pages require an explicit user action.
 }
 
-export function deactivate(): void {
-  // Cleanup is handled through the disposable registered during activation.
+export async function deactivate(): Promise<void> {
+  await shutdown();
 }

@@ -10,19 +10,40 @@ test('ships a restricted Manifest V3 Edge bridge extension', () => {
   const wake = fs.readFileSync(path.join(root, 'wake.js'), 'utf8');
   assert.equal(manifest.manifest_version, 3);
   assert.equal(typeof manifest.key, 'string');
-  assert.deepEqual(manifest.permissions.sort(), ['alarms', 'cookies', 'scripting', 'tabs']);
-  assert.deepEqual(manifest.host_permissions.sort(), ['http://127.0.0.1/*', 'https://codeforces.com/*']);
+  assert.deepEqual(manifest.permissions.sort(), ['alarms', 'cookies', 'scripting', 'storage', 'tabs']);
+  assert.deepEqual(manifest.host_permissions.sort(), [
+    'http://127.0.0.1/*',
+    'https://codeforces.com/*',
+    'https://m1.codeforces.com/*',
+    'https://m2.codeforces.com/*',
+    'https://m3.codeforces.com/*',
+  ]);
   assert.doesNotMatch(JSON.stringify(manifest), /<all_urls>/);
   assert.match(worker, /ws:\/\/127\.0\.0\.1:/);
   assert.match(worker, /credentials: 'include'/);
   assert.match(worker, /chrome\.scripting\.executeScript/);
   assert.match(worker, /form\.submit-form/);
-  assert.match(worker, /form\.requestSubmit\(\)/);
+  assert.match(worker, /form\.removeAttribute\('target'\)/);
+  assert.match(worker, /form\.classList\.remove\('submitFrameForm'\)/);
+  assert.match(worker, /HTMLFormElement\.prototype\.submit\.call\(form\)/);
+  assert.doesNotMatch(worker, /form\.requestSubmit\(\)/);
   assert.match(worker, /X-User-Sha1/);
   assert.match(wake, /cfInlineWake/);
   assert.match(worker, /cfInlineWake/);
   assert.match(worker, /cfInlineReconnect/);
-  assert.match(worker, /BRIDGE_PROTOCOL = 2/);
+  assert.match(worker, /BRIDGE_PROTOCOL = 3/);
+  assert.match(worker, /EXECUTION_TAB_URL/);
+  assert.match(worker, /#__cf_inline_bridge/);
+  assert.match(worker, /isDedicatedExecutionUrl/);
+  assert.match(worker, /discardExecutionTab/);
+  assert.match(worker, /chrome\.tabs\.remove\(tabId\)/);
+  assert.match(worker, /chrome\.storage\.session\.get\('executionTab'\)/);
+  assert.match(worker, /chrome\.storage\.session\.set\(\{ executionTab:/);
+  assert.match(worker, /executionTabOwned/);
+  assert.match(worker, /ensureExecutionTab\(false, forceNew\)/);
+  assert.match(worker, /executeBrowserRequest\(request, timeoutMs, true\)/);
+  assert.match(worker, /执行标签页：/);
+  assert.match(worker, /chrome\.runtime\.getManifest\(\)\.version/);
   assert.match(worker, /type: 'ready'/);
   assert.match(worker, /publishSession\(candidate, 'sessionState'\)/);
   assert.match(worker, /chrome\.cookies\.onChanged/);
@@ -32,6 +53,12 @@ test('ships a restricted Manifest V3 Edge bridge extension', () => {
   assert.match(worker, /hasAuthenticatedSession/);
   assert.match(worker, /return \{ cookies: exportedCookies\(cookies\), userAgent: navigator\.userAgent, valid: true \}/);
   assert.match(worker, /executionTabId/);
+  assert.match(worker, /CODEFORCES_TAB_PATTERNS/);
+  assert.match(worker, /isAuthorizedCodeforcesUrl/);
+  assert.match(worker, /\^m\[1-3\]/);
+  assert.match(worker, /resetExecutionTab/);
+  assert.match(worker, /isScriptAccessError/);
+  assert.match(worker, /executionTabId = undefined;[\s\S]*return executeBrowserRequest/);
   assert.match(worker, /chrome\.windows\.getAll/);
   assert.match(worker, /chrome\.windows\.create/);
   assert.match(worker, /minimizeCodeforcesWindow/);
@@ -57,7 +84,7 @@ test('bridge server listens only on loopback and accepts extension origins', () 
   assert.match(source, /workspace\.workspaceFolders/);
   assert.match(source, /showOpenDialog/);
   assert.match(source, /选择保存配套 Edge 扩展的工作目录/);
-  assert.match(source, /BRIDGE_PROTOCOL = 2/);
+  assert.match(source, /BRIDGE_PROTOCOL = 3/);
   assert.match(source, /message\.type === 'ready'/);
   assert.match(source, /this\.receive\(data\.toString\(\), client\)/);
   assert.match(source, /if \(this\.socket !== source\) return/);
@@ -74,4 +101,15 @@ test('bridge server listens only on loopback and accepts extension origins', () 
   assert.match(source, /openedEdgeForLogin/);
   assert.match(source, /bridge\.run\('minimizeCodeforcesWindow', \{\}, 8_000\)/);
   assert.match(source, /local-only marker/);
+  assert.match(source, /forceReconnect/);
+  assert.match(source, /proxy\.detachTransport\(\)/);
+  assert.match(source, /bridge\.run\('resetExecutionTab'/);
+  assert.match(source, /shutdown\(\): Promise<void>/);
+  assert.match(source, /socket\?\.terminate\(\)/);
+  assert.match(source, /server\.closeAllConnections/);
+  assert.match(source, /this\.rejectAll\(new Error\('Edge 桥接服务已关闭'\)\)/);
+  assert.match(source, /RECONNECT_GRACE_MS = 6_000/);
+  assert.match(source, /get reconnecting\(\): boolean/);
+  assert.match(source, /this\.bridge\.connected \|\| this\.bridge\.reconnecting/);
+  assert.match(source, /await this\.bridge\.waitForConnection\(RECONNECT_GRACE_MS\)/);
 });

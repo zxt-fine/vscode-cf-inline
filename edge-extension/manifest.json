@@ -1,15 +1,27 @@
 {
   "manifest_version": 3,
   "name": "Codeforces Inline Edge Bridge",
-  "version": "0.1.8",
+  "version": "0.1.12",
   "description": "让 VS Code Codeforces Inline 安全复用日常 Edge 的登录状态。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqKUjma2J+rCIPsxyB4eX+DFZMtCceNCs5LqQEpBnTHcqzmrhbIWDxOtOCw6CuI/uAdz8mFzxDrYPaRe6+zVMRq2oX2PkRMxnn477i1gEoVEoY63KIKj2JYq1qaWyDDRQeHYsbISAT5KNLQ/4wtCBE4f9xBA+lDNuBdVnGoINp4yMjV25uXPj9yVYgrgEuOCH/7MFNtCWrPZLYHOFwTzc75YmZJ/K6Mv0m2mUcN+/Bn0Z77qqM6Bf6INyQtZ7018eZCGnJ8l30JXXdFtiOsX87946NF+SrNLZqAvR7jyR4kAmfVeBzlpPvjomQFxrrm47QAn5Nwp8R58UcpCzegu+WwIDAQAB",
-  "permissions": ["tabs", "scripting", "cookies", "alarms"],
-  "host_permissions": ["https://codeforces.com/*", "http://127.0.0.1/*"],
+  "permissions": ["tabs", "scripting", "cookies", "alarms", "storage"],
+  "host_permissions": [
+    "https://codeforces.com/*",
+    "https://m1.codeforces.com/*",
+    "https://m2.codeforces.com/*",
+    "https://m3.codeforces.com/*",
+    "http://127.0.0.1/*"
+  ],
   "background": { "service_worker": "service-worker.js" },
   "action": { "default_title": "Codeforces Inline 已启用" }
   ,"content_scripts": [{
-    "matches": ["http://127.0.0.1/*", "https://codeforces.com/*"],
+    "matches": [
+      "http://127.0.0.1/*",
+      "https://codeforces.com/*",
+      "https://m1.codeforces.com/*",
+      "https://m2.codeforces.com/*",
+      "https://m3.codeforces.com/*"
+    ],
     "js": ["wake.js"],
     "run_at": "document_start"
   }]

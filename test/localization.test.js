@@ -152,9 +152,16 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /function tokenValue/);
   assert.match(script, /\[\[93/);
   assert.match(script, /function tokenMatch/);
+  assert.match(script, /function tokenSignatures/);
+  assert.match(script, /function tokenOccurrences/);
   assert.match(script, /［【\]\+/);
   assert.match(script, /］】\]\+/);
   assert.match(script, /validTokens/);
+  assert.match(script, /actual\[actual\.length-1\]!==expected\[expected\.length-1\]/);
+  assert.match(script, /expected\.slice\(0,-1\)\.sort/);
+  assert.match(script, /nodesBySignature\.get\(match\.signature\)/);
+  assert.match(script, /function normalizeTerminalPunctuation/);
+  assert.match(script, /function normalizeFragmentPunctuation/);
   assert.match(script, /if\(retry\.length\)/);
   assert.match(script, /fragmentFallback/);
   assert.match(script, /fragmentTranslations/);
@@ -170,7 +177,9 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /sourceValid/);
   assert.match(script, /markerIndex<0/);
   assert.match(script, /validTokens\(unit,candidate\)\?candidate:''/);
-  assert.match(script, /if\(!match\)throw new Error\('译文中的公式或代码占位符不完整'\)/);
+  assert.match(script, /if\(!validTokens\(unit,translated\)\)throw new Error\('译文中的公式或代码占位符不完整'\)/);
+  assert.doesNotMatch(script, /if\(!match\)throw new Error\('译文中的公式或代码占位符不完整'\)/);
+  assert.match(script, /translatedStatementLabel/);
   assert.doesNotMatch(script, /source\.slice\(cursor,match\.index\)/);
   assert.match(script, /translatedByIndex\.size!==prepared\.length/);
   assert.doesNotMatch(script, /少数暂未译出的段落保留英文/);

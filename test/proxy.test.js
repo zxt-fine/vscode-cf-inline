@@ -895,6 +895,26 @@ test('reports transport failures to the main frame instead of leaving loading in
   assert.match(page.body.toString('utf8'), /__cf_inline\/relogin/);
 });
 
+test('offers a real Edge reconnect when script permission fails while the session still looks connected', async (t) => {
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/groups/my', port: 0 });
+  const transport = new FakeTransport(() => {
+    throw new Error('Cannot access contents of the page. Extension manifest must request permission to access the respective host.');
+  });
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+
+  const page = await localRequest(`${proxy.origin}/groups/my`);
+  const html = page.body.toString('utf8');
+  assert.equal(page.statusCode, 502);
+  assert.equal(proxy.state().sessionReady, true);
+  assert.match(html, /var reconnectRequired=true/);
+  assert.match(html, /Edge 扩展的执行页或权限状态异常/);
+  assert.match(html, /id="relogin"/);
+  assert.match(html, /重新连接 Edge/);
+  assert.match(html, /if\(!reconnectRequired&&!requestedLogin\)return/);
+});
+
 test('accepts a protected local relogin request and publishes progress state', async (t) => {
   const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/groups/my', port: 0 });
   await proxy.start();

@@ -10,3 +10,5 @@ tsconfig.json
 CONTRIBUTING.md
 SECURITY.md
 out/**/*.map
+*.vsix
+*.zip

@@ -821,7 +821,9 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
     }
     function localizeTextNode(node){
       var p=node.parentElement;
-      if(!p||p.closest(skipSelector)||!isProblemLabel(node)) return;
+      var problemLabel=p&&isProblemLabel(node);
+      var translatedStatementLabel=p&&p.closest('.cf-inline-translated-statement')&&p.closest('.header,.section-title');
+      if(!p||!problemLabel||(p.closest(skipSelector)&&!translatedStatementLabel)) return;
       var raw=node.nodeValue||'';
       var key=raw.trim();
       if(!key) return;
@@ -958,20 +960,44 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         while((match=pattern.exec(tail))){if(match[1].replace(/\\s/g,'')===expected)return {index:cursor+match.index,length:match[0].length};}
         return null;
       }
+      function tokenOccurrences(value){
+        var pattern=/[\\[［【]+\\s*([\\d\\s]+?)\\s*[\\]］】]+/g,match,occurrences=[];
+        while((match=pattern.exec(String(value)))){var digits=match[1].replace(/\\s/g,'');if(/^93\\d+7\\d+(?:39|49)$/.test(digits))occurrences.push({signature:digits,index:match.index,length:match[0].length});}
+        return occurrences;
+      }
+      function tokenSignatures(value){
+        return tokenOccurrences(value).map(function(match){return match.signature;});
+      }
       function validTokens(unit,translated){
-        var cursor=0;
-        for(var index=0;index<unit.nodes.length;index++){var match=tokenMatch(unit,index,translated,cursor);if(!match)return false;cursor=match.index+match.length;}
-        return true;
+        var expected=unit.nodes.map(function(node,index){return token(unit,index).replace(/\\D/g,'');}),actual=tokenSignatures(translated);
+        if(expected.length!==actual.length||!expected.length)return false;
+        // The final empty-node token is a paragraph-end sentinel and must stay
+        // last. Real formula/code nodes may move to match natural Chinese word
+        // order, but their exact multiset must remain unchanged.
+        if(actual[actual.length-1]!==expected[expected.length-1])return false;
+        var expectedContent=expected.slice(0,-1).sort(),actualContent=actual.slice(0,-1).sort();
+        return expectedContent.every(function(signature,index){return actualContent[index]===signature;});
+      }
+      function normalizeTerminalPunctuation(unit,value){
+        var translated=String(value),sourceTail=String(unit.sourceSegments[unit.nodes.length-1]||'').trim();
+        if(!/[：:]$/.test(sourceTail))return translated;
+        var sentinelIndex=unit.nodes.length-1,match=tokenMatch(unit,sentinelIndex,translated,0);
+        if(!match)return translated;
+        var tail=translated.slice(match.index+match.length);
+        return /^\\s*[。．.]+\\s*$/.test(tail)?translated.slice(0,match.index+match.length):translated;
+      }
+      function normalizeFragmentPunctuation(source,value){
+        var translated=String(value);
+        return /[：:]\\s*$/.test(String(source))?translated.replace(/([：:])\\s*[。．.]+\\s*$/,'$1'):translated;
       }
       function apply(unit,translated){
-        var fragment=document.createDocumentFragment(),remaining=String(translated),cursor=0;
-        for(var index=0;index<unit.nodes.length;index++){
-          var node=unit.nodes[index];
-          var match=tokenMatch(unit,index,remaining,cursor);
-          if(!match)throw new Error('译文中的公式或代码占位符不完整');
+        if(!validTokens(unit,translated))throw new Error('译文中的公式或代码占位符不完整');
+        var fragment=document.createDocumentFragment(),remaining=String(translated),cursor=0,nodesBySignature=new Map();
+        unit.nodes.forEach(function(node,index){nodesBySignature.set(token(unit,index).replace(/\\D/g,''),node);});
+        tokenOccurrences(remaining).forEach(function(match){
           fragment.appendChild(document.createTextNode(remaining.slice(cursor,match.index)));
-          fragment.appendChild(node);cursor=match.index+match.length;
-        }
+          fragment.appendChild(nodesBySignature.get(match.signature));cursor=match.index+match.length;
+        });
         fragment.appendChild(document.createTextNode(remaining.slice(cursor)));
         unit.target.replaceChildren(fragment);
       }
@@ -1026,6 +1052,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         var missingTranslations=await requestTranslationItems(missingUnits.map(function(entry){return entry.unit.source;}));
         missingUnits.forEach(function(entry,index){translations[entry.index]=missingTranslations[index];});
       }
+      units.forEach(function(unit,index){translations[index]=normalizeTerminalPunctuation(unit,translations[index]);});
       var retry=[];
       units.forEach(function(unit,index){
         if(!useful(unit.source,translations[index])||!validTokens(unit,translations[index]))retry.push({unit:unit,index:index});
@@ -1042,6 +1069,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           var missingRetryTranslations=await requestTranslationItems(missingRetry.map(function(entry){return entry.unit.source;}));
           missingRetry.forEach(function(entry,index){retryTranslations[entry.index]=missingRetryTranslations[index];});
         }
+        retryUnits.forEach(function(unit,index){retryTranslations[index]=normalizeTerminalPunctuation(unit,retryTranslations[index]);});
         var fragmentFallback=[];
         retry.forEach(function(entry,index){
           var retryUnit=retryUnits[index],translated=retryTranslations[index];
@@ -1066,6 +1094,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           }
           var incompleteFragments=[];
           fragments.forEach(function(fragment,index){
+            fragmentTranslations[index]=normalizeFragmentPunctuation(fragment.text,fragmentTranslations[index]);
             if(useful(fragment.text,fragmentTranslations[index])){
               fragment.fallback.segments[fragment.index]=fragmentTranslations[index];
               rememberStatementTranslation(fragment.text,fragmentTranslations[index]);

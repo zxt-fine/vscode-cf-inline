@@ -15,8 +15,8 @@ test('does not launch Edge while VS Code is merely activating the extension', ()
 
 test('does not leave an incompatible Edge popup after a newer session succeeds', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
-  const handler = source.match(/edgeBridge\.on\('incompatible',[\s\S]*?\n  \}\);/)?.[0] ?? '';
-  assert.match(handler, /edgeBridge\.connected \|\| proxy\?\.isSessionReady\(\)/);
+  const handler = source.match(/activeBridge\.on\('incompatible',[\s\S]*?\n  \}\);/)?.[0] ?? '';
+  assert.match(handler, /activeBridge\.connected \|\| proxy\?\.isSessionReady\(\)/);
   assert.doesNotMatch(handler, /showErrorMessage/);
 });
 
@@ -129,7 +129,26 @@ test('keeps AI enhancement optional and stores its key only in VS Code SecretSto
 test('shows the login panel first and leaves Edge launch to its button', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
   assert.match(source, /The first visible step is always the extension login page/);
-  assert.match(source, /CfPanel\.createOrShow\(context, proxy!, edgeBridge\)/);
-  assert.match(source, /CfPanel\.createOrShow\(context, proxy!, edgeBridge, false\)/);
+  assert.match(source, /CfPanel\.createOrShow\(context, proxy!, activeBridge\)/);
+  assert.match(source, /CfPanel\.createOrShow\(context, proxy!, activeBridge, false\)/);
   assert.doesNotMatch(source, /registerCommand\('cfInline\.openLogin',[\s\S]{0,200}loginWithOfficialBrowser/);
+});
+
+test('fully shuts down proxy, bridge and stale panel across extension restarts', () => {
+  const extensionSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
+  const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'panel.ts'), 'utf8');
+  assert.match(extensionSource, /let shutdownPromise: Promise<void> \| undefined/);
+  assert.match(extensionSource, /CfPanel\.disposeCurrent\(\)/);
+  assert.match(extensionSource, /previousProxy\?\.stop\(\)/);
+  assert.match(extensionSource, /previousBridge\?\.shutdown\(\)/);
+  assert.match(extensionSource, /export async function deactivate\(\): Promise<void>/);
+  assert.match(extensionSource, /await shutdown\(\)/);
+  assert.match(panelSource, /static disposeCurrent\(\): void/);
+  assert.match(panelSource, /CfPanel\.current\?\.panel\.dispose\(\)/);
+});
+
+test('does not immediately invalidate the session during a transient Edge bridge reconnect', () => {
+  const extensionSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
+  assert.doesNotMatch(extensionSource, /activeBridge\.on\('disconnect'.*notifyTransportClosed/);
+  assert.match(extensionSource, /activeBridge\.on\('connect'/);
 });

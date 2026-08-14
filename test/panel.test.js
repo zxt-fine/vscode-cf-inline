@@ -3,10 +3,12 @@ const Module = require('node:module');
 const test = require('node:test');
 
 let createdPanel;
+let createdViewColumn;
 const vscodeStub = {
-  ViewColumn: { One: 1 },
+  ViewColumn: { One: 1, Active: -1 },
   window: {
-    createWebviewPanel() {
+    createWebviewPanel(_type, _title, viewColumn) {
+      createdViewColumn = viewColumn;
       let disposeHandler;
       createdPanel = {
         webview: {
@@ -44,6 +46,7 @@ test('webview reports connected only for a verified account and acquires VS Code
   CfPanel.createOrShow(context, proxy, { connected: false });
   const html = createdPanel.webview.html;
 
+  assert.equal(createdViewColumn, vscodeStub.ViewColumn.Active);
   assert.equal((html.match(/acquireVsCodeApi\(\)/g) || []).length, 1);
   assert.match(html, /id="bridge" src="http:\/\/127\.0\.0\.1:45678\/__cf_inline\/bridge"/);
   assert.match(html, /event\.source === bridge\.contentWindow && data\.__cfInlineBridge/);

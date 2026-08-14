@@ -115,6 +115,8 @@ test('reviews translations through an OpenAI-compatible model and caches the res
     assert.equal(body.model, 'context-reviewer');
     assert.equal(body.response_format, undefined);
     assert.match(body.messages[0].content, /pass 应译为“跳过本回合”/);
+    assert.match(body.messages[0].content, /初稿只供参考/);
+    assert.match(body.messages[0].content, /调整正文占位符的位置/);
     assert.match(body.messages[1].content, /or pass/);
     const content = JSON.stringify({ items: [{ revised: '玩家可以交换 [[9307039]]，或者跳过本回合。' }] });
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -188,4 +190,23 @@ test('falls back only the AI paragraph that damages a protected placeholder', ()
     parseAiTranslationResponse(response, pairs, 'openaiCompatible', true),
     ['正确的第一段 [[9307039]]。', '第二段 [[9307139]]。']
   );
+});
+
+test('allows safe formula reordering for natural Chinese but keeps the end marker last', () => {
+  const pairs = [{
+    source: 'a string [[9307039]] of length [[9307139]] [[9307239]]',
+    draft: '一个字符串 [[9307039]]，长度为 [[9307139]] [[9307239]]',
+  }];
+  const reordered = JSON.stringify({ choices: [{ message: { content: JSON.stringify({ items: [{
+    revised: '一个长度为 [[9307139]] 的字符串 [[9307039]] [[9307239]]',
+  }] }) } }] });
+  assert.deepEqual(
+    parseAiTranslationResponse(reordered, pairs, 'openaiCompatible'),
+    ['一个长度为 [[9307139]] 的字符串 [[9307039]] [[9307239]]']
+  );
+
+  const duplicated = JSON.stringify({ choices: [{ message: { content: JSON.stringify({ items: [{
+    revised: '字符串 [[9307039]]，长度为 [[9307139]]、[[9307139]] [[9307239]]',
+  }] }) } }] });
+  assert.throws(() => parseAiTranslationResponse(duplicated, pairs, 'openaiCompatible'), /修改了.*占位符/);
 });

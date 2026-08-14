@@ -1,9 +1,45 @@
 const PORTS = Array.from({ length: 10 }, (_, index) => 27121 + index);
 const BRIDGE_PATH = '/cf-inline-edge-bridge';
-const BRIDGE_PROTOCOL = 2;
+const BRIDGE_PROTOCOL = 3;
+const EXECUTION_TAB_URL = 'https://codeforces.com/#__cf_inline_bridge';
+const CODEFORCES_TAB_PATTERNS = [
+  'https://codeforces.com/*',
+  'https://m1.codeforces.com/*',
+  'https://m2.codeforces.com/*',
+  'https://m3.codeforces.com/*'
+];
 let socket;
 let heartbeat;
 let executionTabId;
+let executionTabOwned = false;
+
+function isAuthorizedCodeforcesUrl(value) {
+  try {
+    const host = new URL(String(value || '')).hostname.toLowerCase();
+    return host === 'codeforces.com' || /^m[1-3]\.codeforces\.com$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+function isLoginUrl(value) {
+  try { return /^\/enter(?:\/|$)/i.test(new URL(String(value || '')).pathname); }
+  catch { return false; }
+}
+
+function isDedicatedExecutionUrl(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    return isAuthorizedCodeforcesUrl(parsed.href) && parsed.hash === '#__cf_inline_bridge';
+  } catch {
+    return false;
+  }
+}
+
+function isScriptAccessError(error) {
+  return /cannot access contents|must request permission|cannot access a chrome:\/\/ url|extensions gallery cannot be scripted/i
+    .test(error instanceof Error ? error.message : String(error));
+}
 
 function connect() {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
@@ -32,6 +68,7 @@ function tryPort(index) {
     candidate.send(JSON.stringify({
       type: 'ready',
       protocol: BRIDGE_PROTOCOL,
+      extensionVersion: chrome.runtime.getManifest().version,
       userAgent: navigator.userAgent,
       valid: false
     }));
@@ -84,16 +121,20 @@ async function runTask(action, payload, progress) {
   if (action === 'loginState') return { valid: await hasAuthenticatedSession() };
   if (action === 'authenticate') return authenticate(!!payload.interactive, progress);
   if (action === 'minimizeCodeforcesWindow') return minimizeCodeforcesWindow();
+  if (action === 'resetExecutionTab') {
+    await discardExecutionTab(executionTabId);
+    return { reset: true };
+  }
   if (action === 'request') return browserRequest(payload);
   if (action === 'submit') return submitSolution(payload, progress);
   throw new Error(`不支持的桥接任务：${action}`);
 }
 
 async function minimizeCodeforcesWindow() {
-  const activeTabs = await chrome.tabs.query({ active: true, url: ['https://codeforces.com/*'] });
+  const activeTabs = await chrome.tabs.query({ active: true, url: CODEFORCES_TAB_PATTERNS });
   let tab = activeTabs.find((candidate) => typeof candidate.windowId === 'number');
   if (!tab) {
-    const tabs = await chrome.tabs.query({ url: ['https://codeforces.com/*'] });
+    const tabs = await chrome.tabs.query({ url: CODEFORCES_TAB_PATTERNS });
     tab = tabs
       .filter((candidate) => typeof candidate.windowId === 'number')
       .sort((left, right) => Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0))[0];
@@ -125,7 +166,7 @@ function exportedCookies(cookies) {
 }
 
 async function findAuthenticatedTab() {
-  const tabs = await chrome.tabs.query({ url: ['https://codeforces.com/*'] });
+  const tabs = await chrome.tabs.query({ url: CODEFORCES_TAB_PATTERNS });
   for (const tab of tabs) {
     if (!tab.id) continue;
     try {
@@ -163,43 +204,105 @@ async function authenticate(interactive, progress) {
   throw new Error('等待日常 Edge 登录超时');
 }
 
-async function ensureExecutionTab(active = false) {
-  if (executionTabId) {
+async function restoreExecutionTab() {
+  if (executionTabId) return executionTabId;
+  try {
+    const saved = await chrome.storage.session.get('executionTab');
+    const value = saved?.executionTab;
+    if (Number.isInteger(value?.id)) {
+      executionTabId = value.id;
+      executionTabOwned = value.owned === true;
+    }
+  } catch { /* session storage can be unavailable during browser shutdown */ }
+  return executionTabId;
+}
+
+async function rememberExecutionTab(tabId, owned) {
+  executionTabId = tabId;
+  executionTabOwned = owned;
+  await chrome.storage.session.set({ executionTab: { id: tabId, owned } }).catch(() => undefined);
+}
+
+async function clearExecutionTab() {
+  executionTabId = undefined;
+  executionTabOwned = false;
+  await chrome.storage.session.remove('executionTab').catch(() => undefined);
+}
+
+async function ensureExecutionTab(active = false, forceNew = false) {
+  const savedTabId = await restoreExecutionTab();
+  if (savedTabId && !forceNew) {
     try {
-      const cached = await chrome.tabs.get(executionTabId);
-      if (cached.id && /^https:\/\/codeforces\.com\//i.test(String(cached.url || '')) && !String(cached.url || '').includes('/enter')) {
+      const cached = await chrome.tabs.get(savedTabId);
+      if (cached.id && isAuthorizedCodeforcesUrl(cached.url) && !isLoginUrl(cached.url)) {
         return cached;
       }
     } catch { /* the cached tab was closed */ }
-    executionTabId = undefined;
+    await clearExecutionTab();
   }
-  const tabs = await chrome.tabs.query({ url: ['https://codeforces.com/*'] });
-  const usable = tabs.find((tab) => tab.id && !String(tab.url || '').includes('/enter'));
-  if (usable) {
-    executionTabId = usable.id;
-    return usable;
+  if (!forceNew) {
+    const tabs = await chrome.tabs.query({ url: CODEFORCES_TAB_PATTERNS });
+    const usable = tabs
+      .filter((tab) => tab.id && isAuthorizedCodeforcesUrl(tab.url) && !isLoginUrl(tab.url))
+      .sort((left, right) => Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0))[0];
+    if (usable) {
+      await rememberExecutionTab(usable.id, false);
+      return usable;
+    }
   }
   const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
   let tab;
   if (windows.length) {
-    tab = await chrome.tabs.create({ windowId: windows[0].id, url: 'https://codeforces.com/', active });
+    tab = await chrome.tabs.create({ windowId: windows[0].id, url: EXECUTION_TAB_URL, active });
   } else {
-    const created = await chrome.windows.create({ url: 'https://codeforces.com/', focused: active, type: 'normal' });
+    const created = await chrome.windows.create({ url: EXECUTION_TAB_URL, focused: active, type: 'normal' });
     tab = created.tabs?.[0];
   }
   if (!tab?.id) throw new Error('无法创建 Codeforces 后台标签页');
-  executionTabId = tab.id;
+  await rememberExecutionTab(tab.id, true);
   await waitForTab(tab.id, 20000);
   return tab;
 }
 
+async function discardExecutionTab(tabId) {
+  const owned = executionTabOwned;
+  await clearExecutionTab();
+  if (!tabId) return;
+  try {
+    // Never close a normal tab selected from the user's daily Edge. Only the
+    // background fallback tab created by this bridge may be removed.
+    if (owned) await chrome.tabs.remove(tabId);
+  } catch { /* already closed */ }
+}
+
 async function browserRequest(request) {
-  const tab = await ensureExecutionTab(false);
   const timeoutMs = Math.max(10000, Number(request.timeoutMs) || 30000);
-  const [{ result }] = await withTimeout(chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    world: 'MAIN',
-    func: async (input) => {
+  const retryable = /^(?:GET|HEAD)$/i.test(String(request.method || 'GET'));
+  try {
+    return await executeBrowserRequest(request, timeoutMs);
+  } catch (error) {
+    if (!retryable || !isScriptAccessError(error)) throw error;
+    // A cached tab may have navigated to an internal/unapproved page between
+    // selection and script injection. Discard it and retry one read-only
+    // request in a newly selected authorized Codeforces tab.
+    await discardExecutionTab(executionTabId);
+    return executeBrowserRequest(request, timeoutMs, true);
+  }
+}
+
+async function executeBrowserRequest(request, timeoutMs, forceNew = false) {
+  const tab = await ensureExecutionTab(false, forceNew);
+  const fresh = await chrome.tabs.get(tab.id);
+  if (!isAuthorizedCodeforcesUrl(fresh.url) || isLoginUrl(fresh.url)) {
+    await clearExecutionTab();
+    throw new Error('Codeforces 执行标签页已跳转到未授权页面，请重新连接 Edge');
+  }
+  let injection;
+  try {
+    injection = await withTimeout(chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      func: async (input) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), input.timeoutMs || 30000);
       try {
@@ -214,9 +317,15 @@ async function browserRequest(request) {
         for (let offset = 0; offset < buffer.length; offset += 32768) binary += String.fromCharCode(...buffer.subarray(offset, offset + 32768));
         return { statusCode: response.status, headers: Object.fromEntries(response.headers.entries()), bodyBase64: btoa(binary), finalUrl: response.url };
       } finally { clearTimeout(timer); }
-    },
-    args: [request]
-  }), timeoutMs + 2000, 'Edge 页面脚本执行超时');
+      },
+      args: [request]
+    }), timeoutMs + 2000, 'Edge 页面脚本执行超时');
+  } catch (error) {
+    const current = await chrome.tabs.get(tab.id).catch(() => undefined);
+    const targetUrl = String(current?.url || fresh.url || '未知网址');
+    throw new Error(`${error instanceof Error ? error.message : String(error)}（执行标签页：${targetUrl}）`);
+  }
+  const [{ result }] = injection;
   if (!result) throw new Error('日常 Edge 页面没有返回请求结果');
   return result;
 }
@@ -259,7 +368,14 @@ async function submitSolution(request, progress) {
       set('csrf_token', csrf); set('ftaa', ftaa); set('bfaa', bfaa); set('action', 'submitSolutionFormSubmitted');
       set('contestId', input.contestId); set('submittedProblemIndex', input.index); set('submittedProblemCode', input.contestId + input.index);
       set('programTypeId', input.programTypeId); set('source', source); set('sourceSize', String(new TextEncoder().encode(source).length)); set('tabSize', '4');
-      setTimeout(() => form.requestSubmit(), 500);
+      // Codeforces normally targets a hidden iframe (submitFrameForm). A
+      // sub-frame completion is not reported through chrome.tabs.onUpdated,
+      // which made the bridge wait until its 90-second timeout even though the
+      // official form had already answered. Submit the same official form in
+      // the top-level tab so its real success/error response can be observed.
+      form.removeAttribute('target');
+      form.classList.remove('submitFrameForm');
+      setTimeout(() => HTMLFormElement.prototype.submit.call(form), 500);
       return { scheduled: true };
     }, args: [request]
   });
@@ -312,6 +428,6 @@ chrome.cookies.onChanged.addListener((change) => {
   if (/codeforces\.com$/i.test(String(change.cookie?.domain || '').replace(/^\./, ''))) publishSession();
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (tabId === executionTabId) executionTabId = undefined;
+  if (tabId === executionTabId) void clearExecutionTab();
 });
 connect();

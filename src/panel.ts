@@ -8,6 +8,11 @@ const PANEL_TYPE = 'cfInline.panel';
 export class CfPanel {
   private static current: CfPanel | undefined;
 
+  static disposeCurrent(): void {
+    CfPanel.current?.panel.dispose();
+    CfPanel.current = undefined;
+  }
+
   private readonly panel: vscode.WebviewPanel;
   private readonly proxy: CfProxy;
   private readonly context: vscode.ExtensionContext;
@@ -47,7 +52,11 @@ export class CfPanel {
     this.panel = vscode.window.createWebviewPanel(
       PANEL_TYPE,
       'Codeforces Inline',
-      vscode.ViewColumn.One,
+      // Keep the login/connection page in the editor group the user is
+      // currently working in. Forcing it into column one can make VS Code
+      // create a replacement untitled editor when that foreign-group panel
+      // is closed, especially in split-editor layouts.
+      vscode.ViewColumn.Active,
       {
         enableScripts: true,
         retainContextWhenHidden: true,

@@ -18,8 +18,9 @@ const BRIDGE_PORT_START = 27121;
 const BRIDGE_PORT_END = 27130;
 const BRIDGE_PATH = '/cf-inline-edge-bridge';
 const EDGE_EXTENSION_ID = 'gdbpfejeiompakehnjkeggmimbomepgk';
-const BRIDGE_PROTOCOL = 2;
+const BRIDGE_PROTOCOL = 3;
 const TASK_TIMEOUT_MS = 120_000;
+const RECONNECT_GRACE_MS = 6_000;
 
 interface BridgeResult {
   cookies?: BrowserCookie[];
@@ -41,6 +42,7 @@ interface PendingTask {
 
 export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable {
   private server?: http.Server;
+  private webSockets?: WebSocketServer;
   private socket?: WebSocket;
   private protocolReady = false;
   private latestSession?: BridgeResult;
@@ -49,25 +51,37 @@ export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable 
   private readonly pending = new Map<number, PendingTask>();
   private disposed = false;
   private actualPort = 0;
+  private shutdownPromise?: Promise<void>;
+  private reconnectDeadline = 0;
 
   get port(): number { return this.actualPort; }
   get connected(): boolean { return this.protocolReady && this.socket?.readyState === WebSocket.OPEN; }
+  get reconnecting(): boolean { return !this.disposed && !this.connected && Date.now() < this.reconnectDeadline; }
   get sessionSnapshot(): BridgeResult | undefined {
     return this.latestSession?.valid ? this.latestSession : undefined;
   }
 
   waitForConnection(timeoutMs: number): Promise<void> {
+    if (this.disposed) return Promise.reject(new Error('Edge 桥接服务已关闭'));
     if (this.connected) return Promise.resolve();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.off('connect', connected);
+        this.off('stopped', stopped);
         reject(new Error('未检测到配套 Edge 扩展，请确认已经安装并启用'));
       }, timeoutMs);
       const connected = (): void => {
         clearTimeout(timer);
+        this.off('stopped', stopped);
         resolve();
       };
+      const stopped = (): void => {
+        clearTimeout(timer);
+        this.off('connect', connected);
+        reject(new Error('Edge 桥接服务已关闭'));
+      };
       this.once('connect', connected);
+      this.once('stopped', stopped);
     });
   }
 
@@ -110,6 +124,7 @@ export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable 
       server.listen(port, '127.0.0.1', () => {
         server.off('error', reject);
         this.server = server;
+        this.webSockets = webSockets;
         resolve();
       });
     });
@@ -119,6 +134,7 @@ export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable 
     this.socket?.close(1000, 'replaced');
     this.socket = client;
     this.protocolReady = false;
+    this.reconnectDeadline = Date.now() + RECONNECT_GRACE_MS;
     this.latestSession = undefined;
     clearTimeout(this.handshakeTimer);
     this.handshakeTimer = setTimeout(() => {
@@ -136,6 +152,7 @@ export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable 
       this.socket = undefined;
       this.protocolReady = false;
       this.latestSession = undefined;
+      this.reconnectDeadline = Date.now() + RECONNECT_GRACE_MS;
       clearTimeout(this.handshakeTimer);
       this.rejectAll(new Error('日常 Edge 已关闭或配套扩展已断开'));
       this.emit('disconnect');
@@ -149,7 +166,7 @@ export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable 
     // connection has become active. Never let that stale message alter the
     // protocol or session state of the current connection.
     if (this.socket !== source) return;
-    let message: { type?: string; protocol?: number; id?: number; ok?: boolean; value?: BridgeResult; error?: string; message?: string; cookies?: BrowserCookie[]; userAgent?: string; valid?: boolean };
+    let message: { type?: string; protocol?: number; extensionVersion?: string; id?: number; ok?: boolean; value?: BridgeResult; error?: string; message?: string; cookies?: BrowserCookie[]; userAgent?: string; valid?: boolean };
     try { message = JSON.parse(raw); } catch { return; }
     if (message.type === 'ready') {
       if (message.protocol !== BRIDGE_PROTOCOL) {
@@ -159,6 +176,7 @@ export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable 
       }
       clearTimeout(this.handshakeTimer);
       this.protocolReady = true;
+      this.reconnectDeadline = 0;
       this.latestSession = {
         cookies: message.cookies ?? [],
         userAgent: message.userAgent,
@@ -230,16 +248,42 @@ export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable 
   }
 
   dispose(): void {
-    this.disposed = true;
-    this.rejectAll(new Error('Edge 桥接服务已关闭'));
-    this.socket?.close(1000, 'extension stopped');
-    this.socket = undefined;
-    this.protocolReady = false;
-    this.latestSession = undefined;
-    clearTimeout(this.handshakeTimer);
-    this.server?.close();
-    this.server = undefined;
-    this.removeAllListeners();
+    void this.shutdown();
+  }
+
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.shutdownPromise = (async () => {
+      this.disposed = true;
+      this.emit('stopped');
+      this.rejectAll(new Error('Edge 桥接服务已关闭'));
+      const socket = this.socket;
+      const server = this.server;
+      const webSockets = this.webSockets;
+      this.socket = undefined;
+      this.server = undefined;
+      this.webSockets = undefined;
+      this.protocolReady = false;
+      this.latestSession = undefined;
+      this.actualPort = 0;
+      this.reconnectDeadline = 0;
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = undefined;
+      socket?.terminate();
+      await Promise.allSettled([
+        new Promise<void>((resolve) => {
+          if (!server?.listening) { resolve(); return; }
+          server.closeAllConnections?.();
+          server.close(() => resolve());
+        }),
+        new Promise<void>((resolve) => {
+          if (!webSockets) { resolve(); return; }
+          webSockets.close(() => resolve());
+        }),
+      ]);
+      this.removeAllListeners();
+    })();
+    return this.shutdownPromise;
   }
 }
 
@@ -247,16 +291,25 @@ class EdgeBridgeTransport implements CfUpstreamTransport {
   private disposed = false;
   constructor(private readonly bridge: EdgeBridgeServer) {}
 
-  isAlive(): boolean { return !this.disposed && this.bridge.connected; }
+  isAlive(): boolean { return !this.disposed && (this.bridge.connected || this.bridge.reconnecting); }
+
+  private async ensureConnected(): Promise<void> {
+    if (this.disposed) throw new Error('日常 Edge 会话已断开');
+    if (this.bridge.connected) return;
+    if (!this.bridge.reconnecting) throw new Error('日常 Edge 会话已断开');
+    await this.bridge.waitForConnection(RECONNECT_GRACE_MS);
+  }
 
   async hasValidLoginCookie(): Promise<boolean> {
     if (!this.isAlive()) return false;
+    await this.ensureConnected().catch(() => undefined);
+    if (!this.bridge.connected) return false;
     if (this.bridge.sessionSnapshot) return true;
     return (await this.bridge.run('loginState', {}, 15_000)).valid === true;
   }
 
   async request(request: CfTransportRequest): Promise<CfTransportResponse> {
-    if (!this.isAlive()) throw new Error('日常 Edge 会话已断开');
+    await this.ensureConnected();
     const payload = {
       ...request,
       bodyBase64: request.body.toString('base64'),
@@ -275,7 +328,7 @@ class EdgeBridgeTransport implements CfUpstreamTransport {
   }
 
   async submitSolution(request: CfBrowserSubmissionRequest): Promise<CfTransportResponse> {
-    if (!this.isAlive()) throw new Error('日常 Edge 会话已断开');
+    await this.ensureConnected();
     return decodeResponse(await this.bridge.run('submit', request, 180_000));
   }
 
@@ -316,17 +369,27 @@ function isTransientBridgeRequestError(error: unknown): boolean {
   return /超时|timeout|timed out|aborted|signal|message port|frame (?:was )?removed|cannot access contents/i.test(message);
 }
 
-let activeLogin: Promise<void> | undefined;
+const activeLogins = new WeakMap<EdgeBridgeServer, Promise<void>>();
 
 export function loginWithEdgeBridge(
   bridge: EdgeBridgeServer,
   proxy: CfProxy,
   onStatus?: (message: string) => void,
-  interactive = true
+  interactive = true,
+  forceReconnect = false
 ): Promise<void> {
-  if (activeLogin) return activeLogin;
-  if (proxy.isLoggedIn() && proxy.isSessionReady()) return Promise.resolve();
+  const existing = activeLogins.get(bridge);
+  if (existing && !forceReconnect) return existing;
+  if (!forceReconnect && proxy.isLoggedIn() && proxy.isSessionReady()) return Promise.resolve();
   const login = (async () => {
+    if (existing) await existing.catch(() => undefined);
+    if (forceReconnect) {
+      onStatus?.('正在重建 Edge 会话…');
+      await proxy.detachTransport();
+      if (bridge.connected) {
+        await bridge.run('resetExecutionTab', {}, 8_000).catch(() => undefined);
+      }
+    }
     let openedEdgeForLogin = false;
     if (!bridge.connected) {
       if (!interactive) throw new Error('日常 Edge 尚未运行');
@@ -374,8 +437,8 @@ export function loginWithEdgeBridge(
       throw error;
     }
   })();
-  activeLogin = login;
-  return login.finally(() => { if (activeLogin === login) activeLogin = undefined; });
+  activeLogins.set(bridge, login);
+  return login.finally(() => { if (activeLogins.get(bridge) === login) activeLogins.delete(bridge); });
 }
 
 export function restoreEdgeBridgeSession(bridge: EdgeBridgeServer, proxy: CfProxy): Promise<boolean> {

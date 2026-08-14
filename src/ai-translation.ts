@@ -78,9 +78,11 @@ function systemPrompt(): string {
   return [
     '你是算法竞赛题目的专业中译审校员。',
     '不要进行或输出深度思考、推理过程、分析步骤或解释；直接快速完成校对并返回结果。',
-    '请结合标题、相邻段落和完整博弈/算法语境，修正中文初稿中的歧义、漏译和术语错误。',
+    '请结合标题、相邻段落和完整算法语境，根据英文原文重新组织自然、准确、流畅的简体中文；初稿只供参考，不要拘泥于初稿语序，遇到生硬直译时应重写整句或整段。',
+    '数学公式和变量占位符都是句内成分，不要在其前后强行断句；可在不改变语义的前提下调整正文占位符的位置以符合中文语序。段落末尾的最后一个占位符是结束标记，必须仍是最后一个占位符。',
+    '使用算法竞赛常用表述，例如“长度为 n 的字符串 s”“对于每个 1≤i<n”“方案数对 998244353 取模”，避免“一个字符串表示 s，长度为 n”一类英文式语序。',
     '例如回合制游戏中的 pass 应译为“跳过本回合”，player to move 应译为“当前回合行动的玩家”；但 passes all tests 仍是“通过所有测试”。',
-    '不得修改、删除、增加或调整形如 [[数字]] 的公式/代码占位符，不得翻译变量名、代码或专有名称。',
+    '不得修改、删除、增加或重复形如 [[数字]] 的公式/代码占位符，不得翻译变量名、代码或专有名称。',
     '只返回 JSON 对象；items 数组长度及顺序必须与输入一致，每项只包含 revised 字符串：{"items":[{"revised":"..."}]}。',
   ].join('\n');
 }
@@ -124,11 +126,14 @@ export function buildAiChatRequestBody(
 }
 
 function userPrompt(pairs: TranslationPair[]): string {
-  return JSON.stringify(pairs.map((pair, index) => ({
-    index,
-    english: pair.source,
-    chineseDraft: pair.draft,
-  })));
+  return JSON.stringify({
+    instruction: '这些段落按题面顺序相邻。逐段返回通顺完整的中文，保持段落数量和对应关系。',
+    paragraphs: pairs.map((pair, index) => ({
+      index,
+      english: pair.source,
+      chineseDraft: pair.draft,
+    })),
+  });
 }
 
 function parseJsonPayload(text: string): unknown {
@@ -173,7 +178,10 @@ export function parseAiTranslationResponse(
     }
     const expected = placeholderSignature(pairs[index].source);
     const actual = placeholderSignature(revised);
-    if (expected.length !== actual.length || expected.some((token, tokenIndex) => actual[tokenIndex] !== token)) {
+    const expectedSorted = [...expected].sort();
+    const actualSorted = [...actual].sort();
+    const movedEndMarker = expected.length > 1 && actual[actual.length - 1] !== expected[expected.length - 1];
+    if (expected.length !== actual.length || movedEndMarker || expectedSorted.some((token, tokenIndex) => actualSorted[tokenIndex] !== token)) {
       if (fallbackInvalidSegments) return pairs[index].draft;
       throw new Error(`AI 修改了第 ${index + 1} 段中的公式或代码占位符`);
     }
