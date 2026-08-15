@@ -126,6 +126,11 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /recordExists=!!result\.problem/);
   assert.match(script, /☆ 收藏题目/);
   assert.match(script, /titleFavorite\.onclick=toggleFavorite/);
+  assert.match(script, /function installSpoilerFallback\(\)/);
+  assert.match(script, /closest\('\.spoiler-title'\)/);
+  assert.match(script, /classList\.contains\('spoiler-content'\)/);
+  assert.match(script, /hidden\(content\)!==wasHidden/);
+  assert.match(script, /spoiler\.classList\.toggle\('open',show\)/);
   assert.match(script, /function cleanPracticeText/);
   assert.doesNotMatch(script, /title=clean\(/);
   assert.match(script, /installSampleCopyButtons/);
@@ -180,6 +185,9 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /if\(!validTokens\(unit,translated\)\)throw new Error\('译文中的公式或代码占位符不完整'\)/);
   assert.doesNotMatch(script, /if\(!match\)throw new Error\('译文中的公式或代码占位符不完整'\)/);
   assert.match(script, /translatedStatementLabel/);
+  assert.match(script, /\.sample-tests \.title/);
+  assert.match(script, /title\.querySelector\('\.input-output-copier'\)/);
+  assert.match(script, /officialCopier\.style\.display='none'/);
   assert.doesNotMatch(script, /source\.slice\(cursor,match\.index\)/);
   assert.match(script, /translatedByIndex\.size!==prepared\.length/);
   assert.doesNotMatch(script, /少数暂未译出的段落保留英文/);
@@ -217,6 +225,14 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /cf_inline_poll/);
   assert.match(script, /__cf_inline\/submission-status/);
   assert.match(script, /X-CF-Inline':'submission-status/);
+  assert.match(script, /__cf_inline\/submission-history/);
+  assert.match(script, /X-CF-Inline':'submission-history/);
+  assert.match(script, /最近提交/);
+  assert.match(script, /结果待确认/);
+  assert.match(script, /newSubmissionRequestId/);
+  assert.match(script, /previousSubmissionId/);
+  assert.match(script, /resumeSubmissionHistory/);
+  assert.match(script, /historyId=/);
   assert.match(script, /readLatestSubmissionApi/);
   assert.match(script, /parseSubmissionRows\(String\(response\.html\|\|''\),route\)/);
   assert.match(script, /new AbortController\(\)/);

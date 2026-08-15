@@ -131,7 +131,15 @@ export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable 
   }
 
   private accept(client: WebSocket): void {
-    this.socket?.close(1000, 'replaced');
+    const previous = this.socket;
+    if (previous && previous !== client) {
+      // A Manifest V3 service worker may restart while the login tab is
+      // redirecting. Tasks sent through the old socket can never answer on
+      // the replacement socket, so fail them immediately and let the caller
+      // retry instead of leaving the login screen waiting for ten minutes.
+      this.rejectAll(new Error('配套 Edge 扩展连接已切换'));
+      previous.close(1000, 'replaced');
+    }
     this.socket = client;
     this.protocolReady = false;
     this.reconnectDeadline = Date.now() + RECONNECT_GRACE_MS;
@@ -237,6 +245,15 @@ export class EdgeBridgeServer extends EventEmitter implements vscode.Disposable 
       this.pending.set(id, { resolve, reject, timer, onProgress, action });
       socket.send(JSON.stringify({ type: 'task', id, action, payload }));
     });
+  }
+
+  cancelAuthentication(message = '当前登录检测已由新的连接操作替换'): void {
+    for (const [id, task] of this.pending) {
+      if (task.action !== 'authenticate') continue;
+      clearTimeout(task.timer);
+      this.pending.delete(id);
+      task.reject(new Error(message));
+    }
   }
 
   private rejectAll(error: Error): void {
@@ -366,10 +383,61 @@ function decodeResponse(value: BridgeResult): CfTransportResponse {
 
 function isTransientBridgeRequestError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /超时|timeout|timed out|aborted|signal|message port|frame (?:was )?removed|cannot access contents/i.test(message);
+  return /超时|连接已切换|timeout|timed out|aborted|signal|message port|frame (?:was )?removed|cannot access contents/i.test(message);
 }
 
-const activeLogins = new WeakMap<EdgeBridgeServer, Promise<void>>();
+interface ActiveLogin {
+  promise: Promise<void>;
+  interactive: boolean;
+}
+
+const activeLogins = new WeakMap<EdgeBridgeServer, ActiveLogin>();
+
+async function waitForEdgeAuthentication(
+  bridge: EdgeBridgeServer,
+  onStatus?: (message: string) => void,
+  timeoutMs = 10 * 60_000
+): Promise<BridgeResult> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = '';
+  onStatus?.('正在等待日常 Edge 完成 Codeforces 登录…');
+  while (Date.now() < deadline) {
+    if (bridge.sessionSnapshot) return bridge.sessionSnapshot;
+    if (!bridge.connected) {
+      onStatus?.('Edge 扩展正在重新连接，登录状态会自动继续检测…');
+      let reconnected = false;
+      await bridge.waitForConnection(Math.min(15_000, Math.max(1_000, deadline - Date.now())))
+        .then(() => { reconnected = true; })
+        .catch((error) => { lastError = error instanceof Error ? error.message : String(error); });
+      if (/桥接服务已关闭/.test(lastError)) throw new Error(lastError);
+      if (!reconnected || !bridge.connected) {
+        throw new Error(lastError || '日常 Edge 已关闭或配套扩展已断开');
+      }
+    }
+    try {
+      // Keep one long-lived browser-side check instead of creating a new task
+      // every second. A replacement WebSocket rejects this task immediately;
+      // the loop then resumes it on the new channel without exposing internal
+      // retry counters or leaving several authentication scans running.
+      const result = await bridge.run(
+        'authenticate',
+        { interactive: true },
+        Math.max(1_000, deadline - Date.now()),
+        onStatus
+      );
+      if (result.valid) return result;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      if (/桥接服务已关闭|新的连接操作替换/.test(lastError)) throw new Error(lastError);
+      if (!isTransientBridgeRequestError(error) && bridge.connected) throw new Error(lastError);
+    }
+    if (bridge.sessionSnapshot) return bridge.sessionSnapshot;
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+  throw new Error(lastError && !/没有可自动恢复的 Codeforces 登录/.test(lastError)
+    ? `等待日常 Edge 登录超时：${lastError}`
+    : '等待日常 Edge 登录超时，请确认官网右上角已经显示账号名称');
+}
 
 export function loginWithEdgeBridge(
   bridge: EdgeBridgeServer,
@@ -379,10 +447,21 @@ export function loginWithEdgeBridge(
   forceReconnect = false
 ): Promise<void> {
   const existing = activeLogins.get(bridge);
-  if (existing && !forceReconnect) return existing;
+  if (existing && !forceReconnect) {
+    if (!interactive || existing.interactive) return existing.promise;
+    // An automatic non-interactive restore may be running exactly when the
+    // user presses the login button. Let the quick restore finish, then start
+    // the requested interactive flow instead of silently reusing its failure.
+    return existing.promise
+      .catch(() => undefined)
+      .then(() => loginWithEdgeBridge(bridge, proxy, onStatus, true, false));
+  }
   if (!forceReconnect && proxy.isLoggedIn() && proxy.isSessionReady()) return Promise.resolve();
   const login = (async () => {
-    if (existing) await existing.catch(() => undefined);
+    if (existing) {
+      bridge.cancelAuthentication();
+      await existing.promise.catch(() => undefined);
+    }
     if (forceReconnect) {
       onStatus?.('正在重建 Edge 会话…');
       await proxy.detachTransport();
@@ -406,7 +485,7 @@ export function loginWithEdgeBridge(
       await vscode.env.openExternal(vscode.Uri.parse('https://codeforces.com/enter?back=%2F&mobile=false'));
       openedEdgeForLogin = true;
       onStatus?.('请在日常 Edge 中完成账号登录；只有网站实际显示人机验证时才需要验证，请勿关闭该标签页');
-      return bridge.run('authenticate', { interactive: true }, 10 * 60_000, onStatus);
+      return waitForEdgeAuthentication(bridge, onStatus);
     });
     const cookies = [...(result.cookies ?? [])];
     // In bridge mode the rendered account controls can prove authentication
@@ -437,8 +516,11 @@ export function loginWithEdgeBridge(
       throw error;
     }
   })();
-  activeLogins.set(bridge, login);
-  return login.finally(() => { if (activeLogins.get(bridge) === login) activeLogins.delete(bridge); });
+  const active = { promise: login, interactive };
+  activeLogins.set(bridge, active);
+  return login.finally(() => {
+    if (activeLogins.get(bridge) === active) activeLogins.delete(bridge);
+  });
 }
 
 export function restoreEdgeBridgeSession(bridge: EdgeBridgeServer, proxy: CfProxy): Promise<boolean> {

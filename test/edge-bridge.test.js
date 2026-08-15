@@ -31,6 +31,15 @@ test('ships a restricted Manifest V3 Edge bridge extension', () => {
   assert.match(wake, /cfInlineWake/);
   assert.match(worker, /cfInlineWake/);
   assert.match(worker, /cfInlineReconnect/);
+  assert.match(worker, /function sendBridgeMessage\(channel, message\)/);
+  assert.match(worker, /channel\.readyState !== WebSocket\.OPEN/);
+  assert.match(worker, /sendBridgeMessage\(channel, \{ type: 'result'/);
+  const candidateCreated = worker.indexOf('const candidate = new WebSocket');
+  const connectingRecorded = worker.indexOf('socket = candidate;', candidateCreated);
+  const candidateOpened = worker.indexOf('candidate.onopen', candidateCreated);
+  assert.ok(candidateCreated >= 0 && connectingRecorded > candidateCreated && connectingRecorded < candidateOpened,
+    'the connecting WebSocket must be recorded before onopen to prevent parallel reconnect chains');
+  assert.match(worker, /candidate\.onclose = \(\) => \{\s*if \(socket !== candidate\) return;/);
   assert.match(worker, /BRIDGE_PROTOCOL = 3/);
   assert.match(worker, /EXECUTION_TAB_URL/);
   assert.match(worker, /#__cf_inline_bridge/);
@@ -47,10 +56,14 @@ test('ships a restricted Manifest V3 Edge bridge extension', () => {
   assert.match(worker, /type: 'ready'/);
   assert.match(worker, /publishSession\(candidate, 'sessionState'\)/);
   assert.match(worker, /chrome\.cookies\.onChanged/);
+  assert.match(worker, /chrome\.tabs\.onUpdated/);
+  assert.match(worker, /scheduleSessionPublish/);
   assert.match(worker, /正在等待日常 Edge 完成 Codeforces 账号登录/);
   assert.match(worker, /cookieValid \|\| pageValid/);
   assert.match(worker, /await findAuthenticatedTab\(\)/);
   assert.match(worker, /hasAuthenticatedSession/);
+  assert.match(worker, /form\[action\*="\/logout"\]/);
+  assert.match(worker, /return !!profile && \(!!logout \|\| !login\)/);
   assert.match(worker, /return \{ cookies: exportedCookies\(cookies\), userAgent: navigator\.userAgent, valid: true \}/);
   assert.match(worker, /executionTabId/);
   assert.match(worker, /CODEFORCES_TAB_PATTERNS/);
@@ -108,6 +121,14 @@ test('bridge server listens only on loopback and accepts extension origins', () 
   assert.match(source, /socket\?\.terminate\(\)/);
   assert.match(source, /server\.closeAllConnections/);
   assert.match(source, /this\.rejectAll\(new Error\('Edge 桥接服务已关闭'\)\)/);
+  assert.match(source, /配套 Edge 扩展连接已切换/);
+  assert.match(source, /waitForEdgeAuthentication/);
+  assert.match(source, /正在等待日常 Edge 完成 Codeforces 登录/);
+  assert.doesNotMatch(source, /第 \$\{attempt\} 次/);
+  assert.match(source, /'authenticate',\s*\{ interactive: true \}/);
+  assert.match(source, /cancelAuthentication/);
+  assert.match(source, /existing\.interactive/);
+  assert.match(source, /桥接服务已关闭/);
   assert.match(source, /RECONNECT_GRACE_MS = 6_000/);
   assert.match(source, /get reconnecting\(\): boolean/);
   assert.match(source, /this\.bridge\.connected \|\| this\.bridge\.reconnecting/);

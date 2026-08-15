@@ -17,7 +17,7 @@ import { prefersIntegratedBrowser, openInIntegratedBrowser, restoreIntegratedBro
 import { CfPanel } from './panel';
 import { CfProxy } from './proxy';
 import { registerCfSidebar } from './sidebar';
-import { parseOfficialSolvedAllTime, PracticeStore, summarizeDashboard } from './practice';
+import { parseOfficialSolvedAllTime, PracticeStore, SubmissionHistoryStore, summarizeDashboard } from './practice';
 
 let proxy: CfProxy | undefined;
 let edgeBridge: EdgeBridgeServer | undefined;
@@ -273,6 +273,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let lastAiWarning = '';
   let lastAiWarningAt = 0;
   const practiceStore = new PracticeStore(context.globalState);
+  const submissionHistoryStore = new SubmissionHistoryStore(context.globalState);
   proxy = new CfProxy({
     baseUrl: 'https://codeforces.com',
     // Migrate the former default to the account-specific group list on upgrade.
@@ -330,6 +331,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const data = practiceStore.snapshot();
         return { imported, data, summary: summarizeDashboard(data) };
       },
+    },
+    submissionHistory: {
+      get: (id) => submissionHistoryStore.get(id),
+      list: (contestId, index, limit) => submissionHistoryStore.list(contestId, index, limit),
+      create: (input) => submissionHistoryStore.create(input),
+      update: (id, patch) => submissionHistoryStore.update(id, patch),
     },
   });
   await proxy.start();

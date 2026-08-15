@@ -817,12 +817,12 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       if(!p) return false;
       var statement=p.closest('.problem-statement');
       if(!statement) return true;
-      return statement.classList.contains('cf-inline-translated-statement')&&!!p.closest('.header,.section-title');
+      return statement.classList.contains('cf-inline-translated-statement')&&!!p.closest('.header,.section-title,.sample-tests .title');
     }
     function localizeTextNode(node){
       var p=node.parentElement;
       var problemLabel=p&&isProblemLabel(node);
-      var translatedStatementLabel=p&&p.closest('.cf-inline-translated-statement')&&p.closest('.header,.section-title');
+      var translatedStatementLabel=p&&p.closest('.cf-inline-translated-statement')&&p.closest('.header,.section-title,.sample-tests .title');
       if(!p||!problemLabel||(p.closest(skipSelector)&&!translatedStatementLabel)) return;
       var raw=node.nodeValue||'';
       var key=raw.trim();
@@ -1136,6 +1136,14 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       }
       return null;
     }
+    function submissionRoute(contestId,index,submitPath){
+      var path=String(submitPath||''),contest=String(contestId||''),problem=String(index||'').toUpperCase();
+      var group=path.match(/^\\/group\\/([^/]+)\\/contest\\/\\d+\\/submit/i);
+      if(group)return {kind:'group',groupId:group[1],contestId:contest,index:problem,submitPath:path,submissionsPath:'/group/'+group[1]+'/contest/'+contest+'/my'};
+      if(/^\\/gym\\//i.test(path))return {kind:'gym',contestId:contest,index:problem,submitPath:path,submissionsPath:'/gym/'+contest+'/my'};
+      if(/^\\/problemset\\//i.test(path))return {kind:'problemset',contestId:contest,index:problem,submitPath:path,submissionsPath:'/problemset/status?my=on'};
+      return {kind:'contest',contestId:contest,index:problem,submitPath:path,submissionsPath:'/contest/'+contest+'/my'};
+    }
     function installPracticeTracker(){
       var route=parseProblemRoute(),statement=document.querySelector('.problem-statement:not(.cf-inline-translated-statement)');
       if(!route||!statement||statement.dataset.cfInlinePractice)return;statement.dataset.cfInlinePractice='1';
@@ -1154,7 +1162,63 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
     }
     function submitThroughOfficialEdge(payload){
       return fetch('/__cf_inline/submit',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CF-Inline':'submit'},body:JSON.stringify(payload)}).then(function(response){
-        return response.json().catch(function(){return{};}).then(function(result){if(!response.ok)throw new Error(result.error||('HTTP '+response.status));return result;});
+        return response.json().catch(function(){return{};}).then(function(result){if(!response.ok){var error=new Error(result.error||('HTTP '+response.status));error.history=result.history;throw error;}return result;});
+      });
+    }
+    function newSubmissionRequestId(){
+      try{if(crypto&&typeof crypto.randomUUID==='function')return crypto.randomUUID();}catch(error){}
+      return 'submit-'+Date.now()+'-'+Math.random().toString(36).slice(2,12);
+    }
+    function submissionHistoryLabel(record){
+      if(record.status==='submitting')return '正在提交';
+      if(record.status==='judging')return '评测中';
+      if(record.status==='failed')return '提交失败';
+      if(record.status==='unknown')return '结果待确认';
+      return record.verdict==='OK'||record.verdict==='ACCEPTED'?'通过':'评测完成';
+    }
+    function renderSubmissionHistory(panel,records){
+      if(!panel)return;
+      panel._cfInlineRecords=records||[];
+      var list=panel.querySelector('.cf-inline-submission-history-list');
+      if(!list)return;
+      if(!records||!records.length){list.innerHTML='<div class="cf-inline-submission-history-empty">暂无本地提交记录</div>';return;}
+      list.replaceChildren();
+      records.forEach(function(record){
+        var item=document.createElement('article');item.className='cf-inline-submission-history-item is-'+String(record.status||'unknown');
+        if(record.status==='verdict'&&record.verdict!=='OK'&&record.verdict!=='ACCEPTED')item.classList.add('is-rejected');
+        var top=document.createElement('div');top.className='cf-inline-submission-history-top';
+        var state=document.createElement('strong');state.textContent=submissionHistoryLabel(record);
+        var meta=document.createElement('span');var date=new Date(Number(record.createdAt)||Date.now());
+        meta.textContent=(record.submissionId?'#'+record.submissionId+' · ':'')+(record.language||'未知语言')+' · '+date.toLocaleString();
+        top.appendChild(state);top.appendChild(meta);
+        var message=document.createElement('div');message.className='cf-inline-submission-history-message';message.textContent=record.message||'暂无详细信息';
+        item.appendChild(top);item.appendChild(message);list.appendChild(item);
+      });
+    }
+    function createSubmissionHistoryPanel(host){
+      var existing=host&&host.querySelector&&host.querySelector('.cf-inline-submission-history');if(existing)return existing;
+      var panel=document.createElement('section');panel.className='cf-inline-submission-history';panel.innerHTML='<div class="cf-inline-submission-history-heading">最近提交</div><div class="cf-inline-submission-history-list"><div class="cf-inline-submission-history-empty">正在读取提交记录…</div></div>';
+      if(host)host.appendChild(panel);return panel;
+    }
+    function submissionHistoryUrl(route){return '/__cf_inline/submission-history?contestId='+encodeURIComponent(route.contestId)+'&index='+encodeURIComponent(route.index);}
+    function loadSubmissionHistory(route,panel,resume){
+      if(!route||!panel)return Promise.resolve([]);
+      return fetch(submissionHistoryUrl(route),{headers:{'X-CF-Inline':'submission-history'},credentials:'same-origin',cache:'no-store'}).then(function(response){return response.json().catch(function(){return{};}).then(function(result){if(!response.ok)throw new Error(result.error||('HTTP '+response.status));return result.records||[];});}).then(function(records){renderSubmissionHistory(panel,records);if(resume!==false)resumeSubmissionHistory(route,panel,records);return records;}).catch(function(error){var list=panel.querySelector('.cf-inline-submission-history-list');if(list)list.innerHTML='<div class="cf-inline-submission-history-empty is-error">读取历史失败：'+String(error&&error.message||error).replace(/[<>&]/g,'')+'</div>';return[];});
+    }
+    function resumeSubmissionHistory(route,panel,records){
+      var pending=(records||[]).filter(function(record){return record.status==='submitting'||record.status==='judging'||record.status==='unknown';}).slice(0,5);
+      if(!panel._cfInlinePollingIds)panel._cfInlinePollingIds={};
+      pending.forEach(function(record){
+        if(panel._cfInlinePollingIds[record.id])return;
+        panel._cfInlinePollingIds[record.id]=true;var deadline=Date.now()+3*60*1000;
+        function check(){
+          if(!panel._cfInlinePollingIds[record.id]||Date.now()>=deadline){delete panel._cfInlinePollingIds[record.id];return;}
+          readLatestSubmissionApi(route,record.id).then(function(result){
+            if(result&&result.history&&(result.history.status==='verdict'||result.history.status==='failed')){delete panel._cfInlinePollingIds[record.id];return loadSubmissionHistory(route,panel,false);}
+            return loadSubmissionHistory(route,panel,false).then(function(){setTimeout(check,2200);});
+          }).catch(function(){setTimeout(check,3500);});
+        }
+        setTimeout(check,800);
       });
     }
     function installSubmitFormRepair(){
@@ -1175,18 +1239,35 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         var problemIndex=String(index&&index.value||'');
         var code=String(source&&source.value||'');
         var programTypeId=String(language&&language.value||'');
+        var route=submissionRoute(contestId,problemIndex,actionUrl.pathname);
         var status=form.querySelector('.cf-inline-native-submit-status');
         if(!status){status=document.createElement('div');status.className='cf-inline-submit-status cf-inline-native-submit-status';form.appendChild(status);}
+        var historyPanel=createSubmissionHistoryPanel(form);
         if(!contestId||!problemIndex||!programTypeId||!code.trim()){status.className='cf-inline-submit-status cf-inline-native-submit-status is-error';status.textContent='请完整选择题目、语言并填写源代码。';return;}
         form.dataset.cfInlineSubmitting='1';status.className='cf-inline-submit-status cf-inline-native-submit-status is-loading';status.textContent='正在通过 Edge 官方提交页面完成校验并提交…';
         Array.from(form.querySelectorAll('button[type="submit"],input[type="submit"]')).forEach(function(button){button.disabled=true;});
-        submitThroughOfficialEdge({submitPath:actionUrl.pathname,contestId:contestId,index:problemIndex,programTypeId:programTypeId,source:code}).then(function(result){
+        readLatestSubmissionApi(route).catch(function(){return readLatestSubmission(route);}).catch(function(){return null;}).then(function(previous){
+          var requestId=newSubmissionRequestId(),previousId=previous&&previous.id||'';
+          return submitThroughOfficialEdge({requestId:requestId,submitPath:actionUrl.pathname,contestId:contestId,index:problemIndex,programTypeId:programTypeId,language:language&&language.options&&language.options[language.selectedIndex]?language.options[language.selectedIndex].text:'',previousSubmissionId:previousId,source:code}).then(function(result){return {result:result,previousId:previousId,historyId:result.history&&result.history.id||requestId};});
+        }).then(function(submitted){
+          var result=submitted.result;
           var message=readSubmitError(String(result.html||''),Number(result.status||200));if(message)throw new Error(message);
-          status.className='cf-inline-submit-status cf-inline-native-submit-status is-success';status.textContent='Codeforces 已接收代码，请在提交记录中查看评测结果。';
-        }).catch(function(error){status.className='cf-inline-submit-status cf-inline-native-submit-status is-error';status.textContent='提交失败：'+String(error&&error.message||error);}).finally(function(){
+          status.className='cf-inline-submit-status cf-inline-native-submit-status is-loading';status.textContent='Codeforces 已接收代码，正在等待评测结果…';
+          loadSubmissionHistory(route,historyPanel,false);pollSubmissionResult(route,submitted.previousId,status,Date.now(),function(){return document.contains(form);},submitted.historyId,historyPanel);
+        }).catch(function(error){status.className='cf-inline-submit-status cf-inline-native-submit-status '+(error&&error.history&&error.history.status==='unknown'?'is-loading':'is-error');status.textContent=(error&&error.history&&error.history.status==='unknown'?'提交状态待确认：':'提交失败：')+String(error&&error.message||error);loadSubmissionHistory(route,historyPanel,true);}).finally(function(){
           delete form.dataset.cfInlineSubmitting;Array.from(form.querySelectorAll('button[type="submit"],input[type="submit"]')).forEach(function(button){button.disabled=false;});
         });
       },true);
+      function loadNativeHistory(){
+        var form=document.querySelector('form.submit-form');if(!form)return;
+        var index=form.querySelector('[name="submittedProblemIndex"]'),contest=form.querySelector('[name="contestId"]');
+        var action;try{action=new URL(form.getAttribute('action')||location.href,location.href);}catch(error){return;}
+        var match=action.pathname.match(new RegExp('^/(?:contest|gym)/(\\d+)/submit|^/group/[^/]+/contest/(\\d+)/submit','i'));
+        var contestId=String(contest&&contest.value||match&&(match[1]||match[2])||''),problemIndex=String(index&&index.value||'');
+        if(!/^\d+$/.test(contestId)||!/^[A-Za-z0-9]+$/.test(problemIndex))return;
+        loadSubmissionHistory(submissionRoute(contestId,problemIndex,action.pathname),createSubmissionHistoryPanel(form),true);
+      }
+      setTimeout(loadNativeHistory,0);document.addEventListener('change',function(event){if(event.target&&event.target.matches&&event.target.matches('form.submit-form [name="submittedProblemIndex"]'))loadNativeHistory();},true);
     }
     function readSampleText(pre){
       var lines=Array.from(pre.querySelectorAll('.test-example-line'));
@@ -1233,6 +1314,8 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       }
       Array.from(new Set(sections)).forEach(function(section){
         var title=section.querySelector('.title'),pre=section.querySelector('pre');if(!title||!pre)return;
+        var officialCopier=title.querySelector('.input-output-copier');
+        if(officialCopier){officialCopier.hidden=true;officialCopier.style.display='none';officialCopier.setAttribute('aria-hidden','true');}
         if(Array.from(title.children).some(function(child){return child.classList.contains('cf-inline-sample-copy');})){section.dataset.cfInlineSampleCopy='1';return;}
         section.dataset.cfInlineSampleCopy='1';
         var button=document.createElement('button');button.type='button';button.className='cf-inline-sample-copy';button.textContent='复制';button.title='复制这个样例';
@@ -1333,21 +1416,26 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       if(new DOMParser().parseFromString(html,'text/html').querySelector('#enterForm'))throw new Error('登录状态已失效');
       return parseSubmissionRows(html,route)[0]||null;
     }
-    async function readLatestSubmissionApi(route){
+    async function readLatestSubmissionApi(route,historyId){
       var controller=new AbortController(),timer=setTimeout(function(){controller.abort();},20000),response;
-      try{response=await fetch('/__cf_inline/submission-status?contestId='+encodeURIComponent(route.contestId)+'&index='+encodeURIComponent(route.index),{headers:{'X-CF-Inline':'submission-status'},credentials:'same-origin',cache:'no-store',signal:controller.signal});}
+      var historyQuery=historyId?'&historyId='+encodeURIComponent(historyId):'';
+      try{response=await fetch('/__cf_inline/submission-status?contestId='+encodeURIComponent(route.contestId)+'&index='+encodeURIComponent(route.index)+historyQuery,{headers:{'X-CF-Inline':'submission-status'},credentials:'same-origin',cache:'no-store',signal:controller.signal});}
       finally{clearTimeout(timer);}
       var result=await response.json().catch(function(){return{};});
       if(!response.ok)throw new Error(result.error||('HTTP '+response.status));
-      var item=result.submission;if(!item||!item.id)return null;
+      var item=result.submission;if(!item||!item.id)return result.history?{history:result.history}:null;
       var display=verdictDisplay(item.verdict||'',item.verdict||'');
-      return {id:String(item.id),href:route.submissionsPath,label:display.label,pending:display.pending,accepted:display.accepted,time:item.timeConsumedMillis!=null?String(item.timeConsumedMillis)+' ms':'',memory:item.memoryConsumedBytes!=null?Math.round(Number(item.memoryConsumedBytes)/1024)+' KB':''};
+      return {id:String(item.id),href:route.submissionsPath,label:display.label,pending:display.pending,accepted:display.accepted,time:item.timeConsumedMillis!=null?String(item.timeConsumedMillis)+' ms':'',memory:item.memoryConsumedBytes!=null?Math.round(Number(item.memoryConsumedBytes)/1024)+' KB':'',history:result.history};
     }
     function renderSubmissionResult(status,record,message){
       status.textContent=message||('提交 #'+record.id+'：'+record.label+(record.time?' · '+record.time:'')+(record.memory?' · '+record.memory:''));
-      status.className='cf-inline-submit-status '+(record.pending?'is-loading':record.accepted?'is-success':'is-error');
+      setSubmissionStatusClass(status,record.pending?'is-loading':record.accepted?'is-success':'is-error');
     }
-    function pollSubmissionResult(route,previousId,status,sequence,isActive){
+    function setSubmissionStatusClass(status,stateClass){
+      var native=status.classList.contains('cf-inline-native-submit-status');
+      status.className='cf-inline-submit-status'+(native?' cf-inline-native-submit-status':'')+(stateClass?' '+stateClass:'');
+    }
+    function pollSubmissionResult(route,previousId,status,sequence,isActive,historyId,historyPanel){
       var deadline=Date.now()+3*60*1000,lastRecord=null;
       function schedule(delay){
         if(isActive(sequence)&&Date.now()<deadline)setTimeout(check,delay);
@@ -1356,11 +1444,12 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       async function check(){
         if(!isActive(sequence))return;
         try{
-          var record;try{record=await readLatestSubmission(route);}catch(pageError){record=await readLatestSubmissionApi(route);}
+          var record;try{record=await readLatestSubmissionApi(route,historyId);}catch(apiError){record=await readLatestSubmission(route);}
+          if(historyPanel)loadSubmissionHistory(route,historyPanel,false);
           if(record&&record.id!==previousId){lastRecord=record;renderSubmissionResult(status,record);if(!record.pending)return;}
-          else{status.className='cf-inline-submit-status is-loading';status.textContent='Codeforces 已接收代码，正在等待提交记录和评测结果…';}
+          else{setSubmissionStatusClass(status,'is-loading');status.textContent='Codeforces 已接收代码，正在等待提交记录和评测结果…';}
           schedule(2000);
-        }catch(error){status.className='cf-inline-submit-status is-loading';status.textContent='代码已提交，暂时无法刷新评测结果，插件将自动重试。';schedule(3500);}
+        }catch(error){setSubmissionStatusClass(status,'is-loading');status.textContent='代码已提交，暂时无法刷新评测结果，插件将自动重试。';schedule(3500);}
       }
       schedule(900);
     }
@@ -1403,6 +1492,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
         var activeSubmissionSequence=0;
         form.appendChild(languageRow);form.appendChild(sourceLabel);form.appendChild(textarea);form.appendChild(tools);form.appendChild(status);
         content.replaceChildren(form);
+        var historyPanel=createSubmissionHistoryPanel(content);loadSubmissionHistory(route,historyPanel,true);
         file.addEventListener('change',function(){
           var selected=file.files&&file.files[0];
           if(!selected){fileName.textContent='未选择文件';return;}
@@ -1416,15 +1506,16 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           submit.disabled=true;language.disabled=true;file.disabled=true;status.className='cf-inline-submit-status is-loading';status.textContent='正在提交到 Codeforces，请稍候…';
           var sequence=++activeSubmissionSequence;
           readLatestSubmission(route).catch(function(){return null;}).then(function(previous){
-            return submitThroughOfficialEdge({submitPath:route.submitPath,contestId:route.contestId,index:route.index,programTypeId:language.value,source:source}).then(function(response){return {response:response,previousId:previous&&previous.id||''};});
+            var requestId=newSubmissionRequestId(),previousId=previous&&previous.id||'';
+            return submitThroughOfficialEdge({requestId:requestId,submitPath:route.submitPath,contestId:route.contestId,index:route.index,programTypeId:language.value,language:language.options[language.selectedIndex]&&language.options[language.selectedIndex].text||'',previousSubmissionId:previousId,source:source}).then(function(response){return {response:response,previousId:previousId,historyId:response.history&&response.history.id||requestId};});
           }).then(function(result){
             var response=result.response;
             var message=readSubmitError(String(response.html||''),Number(response.status||200));if(message) throw new Error(message);
             var responseRecord=parseSubmissionRows(String(response.html||''),route)[0]||null;
             status.className='cf-inline-submit-status is-loading';status.textContent='Codeforces 已接收代码，正在等待评测结果…';
             if(responseRecord&&responseRecord.id!==result.previousId)renderSubmissionResult(status,responseRecord);
-            pollSubmissionResult(route,result.previousId,status,sequence,function(value){return value===activeSubmissionSequence;});
-          }).catch(function(error){status.className='cf-inline-submit-status is-error';status.textContent='提交失败：'+String(error&&error.message||error);}).finally(function(){submit.disabled=false;language.disabled=false;file.disabled=false;});
+            loadSubmissionHistory(route,historyPanel,false);pollSubmissionResult(route,result.previousId,status,sequence,function(value){return value===activeSubmissionSequence;},result.historyId,historyPanel);
+          }).catch(function(error){status.className='cf-inline-submit-status '+(error&&error.history&&error.history.status==='unknown'?'is-loading':'is-error');status.textContent=(error&&error.history&&error.history.status==='unknown'?'提交状态待确认：':'提交失败：')+String(error&&error.message||error);loadSubmissionHistory(route,historyPanel,true);}).finally(function(){submit.disabled=false;language.disabled=false;file.disabled=false;});
         });
       }).catch(function(error){loading.className='cf-inline-submit-status is-error';loading.textContent='提交框加载失败：'+String(error&&error.message||error)+' 请刷新页面重试。';});
     }
@@ -1495,6 +1586,32 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       var title=document.createElement('strong');title.textContent='当前显示区域过窄';
       var detail=document.createElement('span');detail.textContent='至少需要 380 像素宽度。请向右拖宽 Codeforces 页面区域后继续使用。';
       notice.appendChild(title);notice.appendChild(detail);document.body.appendChild(notice);
+    }
+    function installSpoilerFallback(){
+      if(document.documentElement.dataset.cfInlineSpoilerFallback)return;
+      document.documentElement.dataset.cfInlineSpoilerFallback='1';
+      function hidden(content){
+        return content.hidden||content.style.display==='none'||getComputedStyle(content).display==='none';
+      }
+      document.addEventListener('click',function(event){
+        var target=event.target instanceof Element?event.target.closest('.spoiler-title'):null;
+        if(!target)return;
+        var spoiler=target.closest('.spoiler');
+        var content=target.nextElementSibling;
+        if((!content||!content.classList.contains('spoiler-content'))&&spoiler)content=spoiler.querySelector('.spoiler-content');
+        if(!content)return;
+        var wasHidden=hidden(content);
+        // Let the official Codeforces handler run first. Only take over when
+        // it did not change the content, which happens when its page script
+        // failed to initialize inside the local integrated-browser proxy.
+        setTimeout(function(){
+          if(!document.contains(target)||!document.contains(content)||hidden(content)!==wasHidden)return;
+          var show=wasHidden;
+          content.hidden=!show;content.style.display=show?'block':'none';
+          if(spoiler)spoiler.classList.toggle('open',show);
+          target.setAttribute('aria-expanded',String(show));content.setAttribute('aria-hidden',String(!show));
+        },30);
+      },true);
     }
     function installStatementTranslator(){
       var statement=document.querySelector('.problem-statement');
@@ -1567,12 +1684,13 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       installInlineSubmitter();
       installPracticeTracker();
       installSampleCopyButtons(document);
+      installSpoilerFallback();
       installViewportGuard();
       new MutationObserver(function(mutations){mutations.forEach(function(m){m.addedNodes.forEach(function(node){localize(node);installStatementTranslator();installGlobalParagraphTranslators(node);installSubmitFormRepair();installInlineSubmitter();installPracticeTracker();installSampleCopyButtons(node);});});}).observe(document.documentElement,{childList:true,subtree:true});
     }
     var paragraphStyle=document.createElement('style');paragraphStyle.textContent='.cf-inline-paragraph-toolbar{box-sizing:border-box;display:flex;justify-content:flex-end;align-items:center;min-height:28px;margin:10px 0 4px;padding:0;border-bottom:1px solid #d7e0e8}.cf-inline-paragraph-control{margin:0 0 4px;padding:3px 9px;border:1px solid #9aa8b5;border-radius:3px;background:#f4f8fc;color:#245d8f;font:12px Arial,sans-serif;cursor:pointer}.cf-inline-paragraph-control:disabled{opacity:.6;cursor:wait}.cf-inline-paragraph-translation{box-sizing:border-box;display:block;margin:7px 0 14px;padding:10px 12px;border-left:3px solid #4a90e2;background:#eef6ff;color:#183b59;font:13px/1.65 Arial,sans-serif}.cf-inline-paragraph-translation>*:first-child{margin-top:0}.cf-inline-paragraph-translation>*:last-child{margin-bottom:0}.cf-inline-paragraph-translation[hidden]{display:none}.cf-inline-paragraph-translation.is-error{border-left-color:#c43b3b;background:#fff1f1;color:#8b2222}@media (max-width:520px){.cf-inline-paragraph-toolbar{justify-content:stretch}.cf-inline-paragraph-control{width:100%}}';document.head.appendChild(paragraphStyle);
     var sampleCopyStyle=document.createElement('style');sampleCopyStyle.textContent='.cf-inline-sample-copy{box-sizing:border-box;float:right;margin:-2px 0 0 10px;padding:2px 9px;border:1px solid #8fa5b8;border-radius:3px;background:#f5f8fb;color:#245d8f;font:12px/1.45 Arial,sans-serif;cursor:pointer}.cf-inline-sample-copy:hover{background:#e8f2fc}.cf-inline-sample-copy:disabled{opacity:.75;cursor:default}.cf-inline-sample-copy.is-error{border-color:#c26464;background:#fff1f1;color:#9c2525}';document.head.appendChild(sampleCopyStyle);
-    var style=document.createElement('style'); style.textContent='.cf-inline-translate-bar{display:flex;align-items:center;gap:10px;margin:0 0 1em;padding:8px 10px;border:1px solid #b9b9b9;border-radius:4px;background:#f5f5f5;font-family:Arial,sans-serif;font-size:13px}.cf-inline-translate-bar button{padding:4px 12px;cursor:pointer}.cf-inline-translate-bar span{color:#555}.cf-inline-translated-wrap{margin:1.2em 0;padding:0;border:2px solid #4a90e2;border-radius:6px;background:#fff}.cf-inline-translated-heading{padding:9px 14px;background:#eaf3ff;border-bottom:1px solid #b8d6f4;color:#174f86;font:bold 15px Arial,sans-serif}.cf-inline-translated-statement{margin:0!important;padding:1.2em!important}.cf-inline-translated-wrap[hidden]{display:none}.cf-inline-submit-wrap{margin:1.2em 0 2em;border:2px solid #4e9b68;border-radius:6px;background:#fff;font:14px Arial,sans-serif;color:#222}.cf-inline-submit-heading{padding:10px 14px;background:#eaf7ee;border-bottom:1px solid #b8dcc4;color:#24633a;font:bold 16px Arial,sans-serif}.cf-inline-submit-content{padding:14px}.cf-inline-submit-loading{padding:12px;color:#555}.cf-inline-submit-form{display:flex;flex-direction:column;gap:9px}.cf-inline-submit-row{display:flex;align-items:center;gap:12px}.cf-inline-submit-row>span,.cf-inline-submit-source-label{font-weight:bold}.cf-inline-submit-row select{min-width:320px;max-width:100%;padding:5px}.cf-inline-submit-form textarea{box-sizing:border-box;width:100%;min-height:360px;resize:vertical;padding:10px;border:1px solid #aaa;border-radius:3px;font:13px/1.5 Consolas,"Courier New",monospace;tab-size:4}.cf-inline-submit-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.cf-inline-file-button,.cf-inline-submit-tools button{display:inline-block;padding:7px 13px;border:1px solid #888;border-radius:3px;background:#f4f4f4;cursor:pointer}.cf-inline-file-button input{display:none}.cf-inline-submit-tools button{margin-left:auto;border-color:#347a4c;background:#3f925b;color:#fff;font-weight:bold}.cf-inline-submit-tools button:disabled{opacity:.6;cursor:wait}.cf-inline-file-name{color:#666}.cf-inline-submit-status{min-height:20px;padding:6px 8px;border-radius:3px;background:#f5f5f5;color:#555}.cf-inline-submit-status.is-loading{background:#fff8df;color:#765a00}.cf-inline-submit-status.is-success{background:#eaf7ee;color:#24633a}.cf-inline-submit-status.is-error{background:#fff0f0;color:#a32626}.cf-inline-submit-status a{margin-left:8px;font-weight:bold}.cf-inline-too-narrow{display:none}html,body{max-width:100%}.problem-statement,.cf-inline-translated-wrap,.cf-inline-submit-wrap{box-sizing:border-box;max-width:100%}.problem-statement img,.problem-statement table{max-width:100%}.problem-statement .sample-tests,.problem-statement .input,.problem-statement .output{min-width:0;max-width:100%}.problem-statement pre,.datatable{max-width:100%;overflow-x:auto}.MathJax_Display,mjx-container[display="true"]{max-width:100%;overflow-x:auto;overflow-y:hidden}@media (max-width:1200px){html,body{min-width:0!important;overflow-x:hidden}#body{box-sizing:border-box;width:auto!important;min-width:0!important;max-width:100%!important;margin-left:12px!important;margin-right:12px!important}#pageContent,#pageContent>.content{box-sizing:border-box;min-width:0!important;max-width:100%!important;width:auto!important}.content-with-sidebar{margin-right:0!important}#sidebar{display:none!important}.problem-statement,.cf-inline-translated-statement{overflow-wrap:anywhere}.problem-statement table{display:block;overflow-x:auto}.roundbox{max-width:100%;box-sizing:border-box}}@media (max-width:760px){#body{margin-left:7px!important;margin-right:7px!important}.menu-box,.menu-list,.second-level-menu,.second-level-menu-list{height:auto!important;min-height:0!important;overflow:visible!important}.menu-list,.second-level-menu-list{box-sizing:border-box;display:flex!important;flex-wrap:wrap!important;position:static!important}.menu-list{margin:.15em 0!important;padding-left:.7em!important}.second-level-menu{box-sizing:border-box;position:static!important;left:auto!important;top:auto!important;clear:both!important;margin:0 0 .65em!important}.second-level-menu-list{width:100%!important;margin:0!important;padding:0!important}.menu-list li,.second-level-menu-list li{box-sizing:border-box;float:none!important;margin-right:.65em!important;white-space:nowrap}.menu-list li.backLava,.second-level-menu-list li.backLava{display:none!important}.action-link{box-sizing:border-box;clear:both!important;height:auto!important;min-height:2.2em!important;margin:.25em 0 .55em!important}.action-link>div{position:static!important;right:auto!important;top:auto!important;line-height:2em!important;text-align:right!important;white-space:normal!important}#pageContent{clear:both!important}.cf-inline-translate-bar,.cf-inline-submit-row{align-items:stretch;flex-direction:column}.cf-inline-submit-row select{min-width:0;width:100%}.cf-inline-submit-tools button{margin-left:0}.problem-statement{font-size:1em!important}.problem-statement .header .title{font-size:1.35em!important}}@media (max-width:520px){#body{margin-left:5px!important;margin-right:5px!important}#header{box-sizing:border-box;max-width:100%!important;height:auto!important;min-height:0!important}#header img{max-width:100%!important;height:auto}.menu-box{line-height:1.9em!important;padding-top:.4em!important}.menu-list,.second-level-menu-list{gap:2px 0}.menu-list li,.second-level-menu-list li{margin-right:.55em!important}.menu-list li a,.second-level-menu-list li a{font-size:14px!important}.action-link>div{text-align:left!important}.cf-inline-translate-bar{gap:7px;padding:7px}.cf-inline-translate-bar button{width:100%}.cf-inline-translated-statement{padding:.8em!important}.cf-inline-submit-content{padding:10px}.problem-statement .header .title{font-size:1.2em!important}}@media (max-width:380px){body>.cf-inline-too-narrow{box-sizing:border-box;display:flex!important;position:fixed;inset:12px;z-index:2147483647;align-items:center;justify-content:center;flex-direction:column;gap:10px;padding:22px;border:2px solid #b88320;border-radius:8px;background:#fff8df;color:#5f470c;text-align:center;font:15px/1.6 -apple-system,"Segoe UI",sans-serif}body>:not(.cf-inline-too-narrow){display:none!important}}'; document.head.appendChild(style);
+    var style=document.createElement('style'); style.textContent='.cf-inline-translate-bar{display:flex;align-items:center;gap:10px;margin:0 0 1em;padding:8px 10px;border:1px solid #b9b9b9;border-radius:4px;background:#f5f5f5;font-family:Arial,sans-serif;font-size:13px}.cf-inline-translate-bar button{padding:4px 12px;cursor:pointer}.cf-inline-translate-bar span{color:#555}.cf-inline-translated-wrap{margin:1.2em 0;padding:0;border:2px solid #4a90e2;border-radius:6px;background:#fff}.cf-inline-translated-heading{padding:9px 14px;background:#eaf3ff;border-bottom:1px solid #b8d6f4;color:#174f86;font:bold 15px Arial,sans-serif}.cf-inline-translated-statement{margin:0!important;padding:1.2em!important}.cf-inline-translated-wrap[hidden]{display:none}.cf-inline-submit-wrap{margin:1.2em 0 2em;border:2px solid #4e9b68;border-radius:6px;background:#fff;font:14px Arial,sans-serif;color:#222}.cf-inline-submit-heading{padding:10px 14px;background:#eaf7ee;border-bottom:1px solid #b8dcc4;color:#24633a;font:bold 16px Arial,sans-serif}.cf-inline-submit-content{padding:14px}.cf-inline-submit-loading{padding:12px;color:#555}.cf-inline-submit-form{display:flex;flex-direction:column;gap:9px}.cf-inline-submit-row{display:flex;align-items:center;gap:12px}.cf-inline-submit-row>span,.cf-inline-submit-source-label{font-weight:bold}.cf-inline-submit-row select{min-width:320px;max-width:100%;padding:5px}.cf-inline-submit-form textarea{box-sizing:border-box;width:100%;min-height:360px;resize:vertical;padding:10px;border:1px solid #aaa;border-radius:3px;font:13px/1.5 Consolas,"Courier New",monospace;tab-size:4}.cf-inline-submit-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.cf-inline-file-button,.cf-inline-submit-tools button{display:inline-block;padding:7px 13px;border:1px solid #888;border-radius:3px;background:#f4f4f4;cursor:pointer}.cf-inline-file-button input{display:none}.cf-inline-submit-tools button{margin-left:auto;border-color:#347a4c;background:#3f925b;color:#fff;font-weight:bold}.cf-inline-submit-tools button:disabled{opacity:.6;cursor:wait}.cf-inline-file-name{color:#666}.cf-inline-submit-status{min-height:20px;padding:6px 8px;border-radius:3px;background:#f5f5f5;color:#555}.cf-inline-submit-status.is-loading{background:#fff8df;color:#765a00}.cf-inline-submit-status.is-success{background:#eaf7ee;color:#24633a}.cf-inline-submit-status.is-error{background:#fff0f0;color:#a32626}.cf-inline-submit-status a{margin-left:8px;font-weight:bold}.cf-inline-submission-history{margin-top:14px;border:1px solid #ccd3dc;border-radius:5px;background:#fafbfc;color:#25282d}.cf-inline-submission-history-heading{padding:8px 10px;border-bottom:1px solid #dfe3e8;font-weight:bold}.cf-inline-submission-history-list{display:flex;flex-direction:column}.cf-inline-submission-history-empty{padding:10px;color:#6a7079}.cf-inline-submission-history-empty.is-error{color:#a32626}.cf-inline-submission-history-item{padding:9px 10px;border-top:1px solid #e7eaee;border-left:4px solid #1976d2}.cf-inline-submission-history-item:first-child{border-top:0}.cf-inline-submission-history-item.is-submitting,.cf-inline-submission-history-item.is-judging{border-left-color:#1976d2;background:#f3f8fd}.cf-inline-submission-history-item.is-unknown{border-left-color:#ed8b00;background:#fff8e8}.cf-inline-submission-history-item.is-failed,.cf-inline-submission-history-item.is-rejected{border-left-color:#c62828;background:#fff5f5}.cf-inline-submission-history-item.is-verdict:not(.is-rejected){border-left-color:#2e7d32;background:#f1f9f2}.cf-inline-submission-history-top{display:flex;align-items:center;justify-content:space-between;gap:12px}.cf-inline-submission-history-top span{color:#6a7079;font-size:12px;text-align:right}.cf-inline-submission-history-message{margin-top:4px;overflow-wrap:anywhere}.cf-inline-too-narrow{display:none}html,body{max-width:100%}.problem-statement,.cf-inline-translated-wrap,.cf-inline-submit-wrap{box-sizing:border-box;max-width:100%}.problem-statement img,.problem-statement table{max-width:100%}.problem-statement .sample-tests,.problem-statement .input,.problem-statement .output{min-width:0;max-width:100%}.problem-statement pre,.datatable{max-width:100%;overflow-x:auto}.MathJax_Display,mjx-container[display="true"]{max-width:100%;overflow-x:auto;overflow-y:hidden}@media (max-width:1200px){html,body{min-width:0!important;overflow-x:hidden}#body{box-sizing:border-box;width:auto!important;min-width:0!important;max-width:100%!important;margin-left:12px!important;margin-right:12px!important}#pageContent,#pageContent>.content{box-sizing:border-box;min-width:0!important;max-width:100%!important;width:auto!important}.content-with-sidebar{margin-right:0!important}#sidebar{display:none!important}.problem-statement,.cf-inline-translated-statement{overflow-wrap:anywhere}.problem-statement table{display:block;overflow-x:auto}.roundbox{max-width:100%;box-sizing:border-box}}@media (max-width:760px){#body{margin-left:7px!important;margin-right:7px!important}.menu-box,.menu-list,.second-level-menu,.second-level-menu-list{height:auto!important;min-height:0!important;overflow:visible!important}.menu-list,.second-level-menu-list{box-sizing:border-box;display:flex!important;flex-wrap:wrap!important;position:static!important}.menu-list{margin:.15em 0!important;padding-left:.7em!important}.second-level-menu{box-sizing:border-box;position:static!important;left:auto!important;top:auto!important;clear:both!important;margin:0 0 .65em!important}.second-level-menu-list{width:100%!important;margin:0!important;padding:0!important}.menu-list li,.second-level-menu-list li{box-sizing:border-box;float:none!important;margin-right:.65em!important;white-space:nowrap}.menu-list li.backLava,.second-level-menu-list li.backLava{display:none!important}.action-link{box-sizing:border-box;clear:both!important;height:auto!important;min-height:2.2em!important;margin:.25em 0 .55em!important}.action-link>div{position:static!important;right:auto!important;top:auto!important;line-height:2em!important;text-align:right!important;white-space:normal!important}#pageContent{clear:both!important}.cf-inline-translate-bar,.cf-inline-submit-row{align-items:stretch;flex-direction:column}.cf-inline-submit-row select{min-width:0;width:100%}.cf-inline-submit-tools button{margin-left:0}.cf-inline-submission-history-top{align-items:flex-start;flex-direction:column;gap:3px}.cf-inline-submission-history-top span{text-align:left}.problem-statement{font-size:1em!important}.problem-statement .header .title{font-size:1.35em!important}}@media (max-width:520px){#body{margin-left:5px!important;margin-right:5px!important}#header{box-sizing:border-box;max-width:100%!important;height:auto!important;min-height:0!important}#header img{max-width:100%!important;height:auto}.menu-box{line-height:1.9em!important;padding-top:.4em!important}.menu-list,.second-level-menu-list{gap:2px 0}.menu-list li,.second-level-menu-list li{margin-right:.55em!important}.menu-list li a,.second-level-menu-list li a{font-size:14px!important}.action-link>div{text-align:left!important}.cf-inline-translate-bar{gap:7px;padding:7px}.cf-inline-translate-bar button{width:100%}.cf-inline-translated-statement{padding:.8em!important}.cf-inline-submit-content{padding:10px}.problem-statement .header .title{font-size:1.2em!important}}@media (max-width:380px){body>.cf-inline-too-narrow{box-sizing:border-box;display:flex!important;position:fixed;inset:12px;z-index:2147483647;align-items:center;justify-content:center;flex-direction:column;gap:10px;padding:22px;border:2px solid #b88320;border-radius:8px;background:#fff8df;color:#5f470c;text-align:center;font:15px/1.6 -apple-system,"Segoe UI",sans-serif}body>:not(.cf-inline-too-narrow){display:none!important}}'; document.head.appendChild(style);
     var practiceStyle=document.createElement('style');practiceStyle.textContent='.cf-inline-title-favorite{display:inline-block!important;margin-left:12px!important;padding:4px 10px!important;border:1px solid #d19a20!important;border-radius:5px!important;background:#fff8dc!important;color:#8b6200!important;font:bold 12px/1.35 Arial,sans-serif!important;vertical-align:middle!important;cursor:pointer!important}.cf-inline-title-favorite:hover,.cf-inline-title-favorite.active{background:#ffeaa0!important;color:#704d00!important}.cf-inline-practice{box-sizing:border-box;margin:0 0 14px;border:1px solid #b8d6f4;border-radius:6px;background:#f8fbff;color:#223;font:13px/1.5 Arial,sans-serif}.cf-inline-practice-heading{display:flex;align-items:center;gap:9px;padding:8px 11px;border-bottom:1px solid #d4e5f5}.cf-inline-practice-heading strong{color:#174f86;font-size:14px}.cf-inline-practice-heading a{color:#276da8;text-decoration:none}.cf-inline-practice-heading button{padding:3px 8px;border:1px solid #94abc0;border-radius:4px;background:#fff;color:#41576a;cursor:pointer}.cf-inline-practice-heading button.active{border-color:#d79a13;background:#fff8dc;color:#986700}.cf-inline-practice-status{margin-left:auto;color:#687786}.cf-inline-practice-body{display:flex;align-items:flex-start;gap:12px;padding:10px 11px}.cf-inline-practice-body label{display:flex;gap:7px;align-items:center;font-weight:bold}.cf-inline-practice-body select{padding:5px;min-width:110px}.cf-inline-note-label{flex:1}.cf-inline-practice-body textarea{box-sizing:border-box;flex:1;min-height:58px;padding:7px;resize:vertical;border:1px solid #aab6c1;border-radius:3px;font:13px/1.45 Arial,sans-serif}@media(max-width:650px){.cf-inline-title-favorite{display:block!important;width:max-content;margin:7px auto 0!important}.cf-inline-practice-heading,.cf-inline-practice-body{align-items:stretch;flex-direction:column}.cf-inline-practice-status{margin-left:0}.cf-inline-practice-body label{align-items:stretch;flex-direction:column}}';document.head.appendChild(practiceStyle);
     var controlledDesktop=document.createElement('style');controlledDesktop.id='cf-inline-controlled-desktop-style';controlledDesktop.textContent=${controlledDesktopStyle};document.head.appendChild(controlledDesktop);
     if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start); else start();

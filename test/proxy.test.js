@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const net = require('node:net');
 const test = require('node:test');
-const { CfProxy } = require('../out/proxy.js');
+const { CfProxy, classifyCodeforcesSubmissionResponse, formatSubmissionVerdict } = require('../out/proxy.js');
 
 const VALID_USER = '0123456789abcdef0123456789abcdef01234567';
 
@@ -671,6 +671,123 @@ test('routes protected submissions through the official Edge page transport', as
   assert.equal(transport.submissions.length, 1);
   assert.equal(transport.submissions[0].url, 'https://codeforces.com/contest/1/submit');
   assert.equal(transport.submissions[0].source, 'int main() { return 0; }');
+});
+
+test('classifies official submission responses without turning success into an error', () => {
+  const success = classifyCodeforcesSubmissionResponse(response(
+    '<script>Codeforces.showMessage("Solution to the problem A has been submitted successfully")</script>',
+    'https://codeforces.com/contest/1/my'
+  ));
+  assert.equal(success.status, 'judging');
+  assert.match(success.message, /Codeforces 已接收/);
+  const russian = classifyCodeforcesSubmissionResponse(response(
+    '<script>Codeforces.showMessage("Решение задачи A успешно отправлено на проверку")</script>',
+    'https://codeforces.com/contest/1/my'
+  ));
+  assert.equal(russian.status, 'judging');
+  const failed = classifyCodeforcesSubmissionResponse(response(
+    '<div class="genericError">Source should differ from previously submitted</div>',
+    'https://codeforces.com/contest/1/submit'
+  ));
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.message, /Source should differ/);
+  assert.equal(formatSubmissionVerdict('WRONG_ANSWER'), '答案错误');
+  assert.equal(formatSubmissionVerdict('OK'), '通过');
+});
+
+test('persists protected submission history and updates it from verdict polling', async (t) => {
+  const records = [];
+  const history = {
+    get(id) { return records.find((record) => record.id === id); },
+    list(contestId, index, limit = 20) { return records.filter((record) => record.contestId === contestId && record.index === index).slice(0, limit); },
+    async create(input) { const record = { ...input, createdAt: Date.now(), updatedAt: Date.now() }; records.unshift(record); return record; },
+    async update(id, patch) { const record = records.find((item) => item.id === id); if (!record) return undefined; Object.assign(record, patch, { updatedAt: Date.now() }); return { ...record }; },
+  };
+  const transport = new FakeTransport((request) => {
+    if (request.method === 'BROWSER_SUBMIT') return response('<script>Codeforces.showMessage("Solution to the problem A has been submitted successfully")</script>', 'https://codeforces.com/contest/1/my');
+    if (request.url.includes('/api/user.status')) return response(JSON.stringify({ status: 'OK', result: [{ id: 101, creationTimeSeconds: Math.floor(Date.now() / 1000), verdict: 'OK', timeConsumedMillis: 31, memoryConsumedBytes: 4096, problem: { contestId: 1, index: 'A' } }] }), request.url);
+    return response('<nav><a href="/profile/tester">tester</a><a href="/logout">Logout</a></nav>', request.url);
+  });
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/contest/1/problem/A', port: 0, submissionHistory: history });
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+  await localRequest(`${proxy.origin}/contest/1/problem/A`);
+  const submitted = await localRequest(`${proxy.origin}/__cf_inline/submit`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CF-Inline': 'submit' },
+    body: Buffer.from(JSON.stringify({ requestId: 'submit-history-101', submitPath: '/contest/1/submit', contestId: '1', index: 'A', programTypeId: '89', language: 'GNU C++20', previousSubmissionId: '100', source: 'int main(){}' })),
+  });
+  const submittedResult = JSON.parse(submitted.body.toString('utf8'));
+  assert.equal(submittedResult.history.status, 'judging');
+  assert.equal(records[0].source, undefined);
+
+  const rejectedHistory = await localRequest(`${proxy.origin}/__cf_inline/submission-history?contestId=1&index=A`);
+  assert.equal(rejectedHistory.statusCode, 403);
+  const listed = await localRequest(`${proxy.origin}/__cf_inline/submission-history?contestId=1&index=A`, { headers: { 'X-CF-Inline': 'submission-history' } });
+  assert.equal(JSON.parse(listed.body.toString('utf8')).records.length, 1);
+  const polled = await localRequest(`${proxy.origin}/__cf_inline/submission-status?contestId=1&index=A&historyId=submit-history-101`, { headers: { 'X-CF-Inline': 'submission-status' } });
+  const pollResult = JSON.parse(polled.body.toString('utf8'));
+  assert.equal(pollResult.history.status, 'verdict');
+  assert.equal(pollResult.history.verdict, 'OK');
+  assert.match(pollResult.history.message, /通过/);
+});
+
+test('keeps an interrupted submission as unknown instead of reporting a false failure', async (t) => {
+  const records = [];
+  const history = {
+    get(id) { return records.find((record) => record.id === id); },
+    list() { return records; },
+    async create(input) { const record = { ...input, createdAt: Date.now(), updatedAt: Date.now() }; records.unshift(record); return record; },
+    async update(id, patch) { const record = records.find((item) => item.id === id); Object.assign(record, patch); return { ...record }; },
+  };
+  const transport = new FakeTransport((request) => {
+    if (request.method === 'BROWSER_SUBMIT') throw new Error('Client network socket disconnected');
+    return response('<nav><a href="/profile/tester">tester</a><a href="/logout">Logout</a></nav>', request.url);
+  });
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/', port: 0, submissionHistory: history });
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+  const result = await localRequest(`${proxy.origin}/__cf_inline/submit`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CF-Inline': 'submit' },
+    body: Buffer.from(JSON.stringify({ requestId: 'submit-interrupted-1', submitPath: '/contest/1/submit', contestId: '1', index: 'A', programTypeId: '89', language: 'GNU C++20', previousSubmissionId: '100', source: 'int main(){}' })),
+  });
+  assert.equal(result.statusCode, 502);
+  const body = JSON.parse(result.body.toString('utf8'));
+  assert.equal(body.history.status, 'unknown');
+  assert.match(body.history.message, /是否已接收暂时无法确认/);
+});
+
+test('maps rapid consecutive attempts to different Codeforces submission ids', async (t) => {
+  const now = Date.now();
+  const records = [
+    { id: 'attempt-newer-102', contestId: 1, index: 'A', programTypeId: '89', language: 'GNU C++20', status: 'judging', message: '等待', previousSubmissionId: '100', createdAt: now - 1_000, updatedAt: now - 1_000 },
+    { id: 'attempt-older-101', contestId: 1, index: 'A', programTypeId: '89', language: 'GNU C++20', status: 'judging', message: '等待', previousSubmissionId: '100', createdAt: now - 2_000, updatedAt: now - 2_000 },
+  ];
+  const history = {
+    get(id) { const record = records.find((item) => item.id === id); return record && { ...record }; },
+    list(contestId, index) { return records.filter((record) => record.contestId === contestId && record.index === index).map((record) => ({ ...record })); },
+    async create(input) { const record = { ...input, createdAt: Date.now(), updatedAt: Date.now() }; records.unshift(record); return record; },
+    async update(id, patch) { const record = records.find((item) => item.id === id); Object.assign(record, patch); return { ...record }; },
+  };
+  const transport = new FakeTransport((request) => {
+    if (request.url.includes('/api/user.status')) return response(JSON.stringify({ status: 'OK', result: [
+      { id: 102, creationTimeSeconds: Math.floor((now - 500) / 1000), verdict: 'TESTING', problem: { contestId: 1, index: 'A' } },
+      { id: 101, creationTimeSeconds: Math.floor((now - 1_500) / 1000), verdict: 'OK', problem: { contestId: 1, index: 'A' } },
+      { id: 100, creationTimeSeconds: Math.floor((now - 60_000) / 1000), verdict: 'OK', problem: { contestId: 1, index: 'A' } },
+    ] }), request.url);
+    return response('<nav><a href="/profile/tester">tester</a><a href="/logout">Logout</a></nav>', request.url);
+  });
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/', port: 0, submissionHistory: history });
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+  await localRequest(`${proxy.origin}/`);
+  const older = await localRequest(`${proxy.origin}/__cf_inline/submission-status?contestId=1&index=A&historyId=attempt-older-101`, { headers: { 'X-CF-Inline': 'submission-status' } });
+  const newer = await localRequest(`${proxy.origin}/__cf_inline/submission-status?contestId=1&index=A&historyId=attempt-newer-102`, { headers: { 'X-CF-Inline': 'submission-status' } });
+  assert.equal(JSON.parse(older.body.toString('utf8')).history.submissionId, '101');
+  assert.equal(JSON.parse(newer.body.toString('utf8')).history.submissionId, '102');
+  assert.notEqual(records[0].submissionId, records[1].submissionId);
 });
 
 test('protects the submission status fallback endpoint', async (t) => {

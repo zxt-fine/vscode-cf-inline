@@ -6,7 +6,13 @@ import {
   buildLocalizationClientScript,
   LocalizationOptions,
 } from './localization';
-import { CODEFORCES_TAG_ZH, DashboardData, DashboardSummary, ProblemRecord } from './practice';
+import {
+  CODEFORCES_TAG_ZH,
+  DashboardData,
+  DashboardSummary,
+  LocalSubmissionHistoryRecord,
+  ProblemRecord,
+} from './practice';
 
 export interface CfProxyOptions {
   baseUrl: string;
@@ -23,6 +29,12 @@ export interface CfProxyOptions {
     deleteProblem(contestId: number, index: string): Promise<boolean>;
     dashboard(): { data: DashboardData; summary: DashboardSummary };
     sync(handle: string): Promise<{ imported: number; data: DashboardData; summary: DashboardSummary }>;
+  };
+  submissionHistory?: {
+    get(id: string): LocalSubmissionHistoryRecord | undefined;
+    list(contestId?: number, index?: string, limit?: number): LocalSubmissionHistoryRecord[];
+    create(input: Omit<LocalSubmissionHistoryRecord, 'createdAt' | 'updatedAt'>): Promise<LocalSubmissionHistoryRecord>;
+    update(id: string, patch: Partial<LocalSubmissionHistoryRecord>): Promise<LocalSubmissionHistoryRecord | undefined>;
   };
 }
 
@@ -148,6 +160,7 @@ export class CfProxy extends EventEmitter {
   private readonly writeClipboardText?: (text: string) => Promise<void>;
   private readonly enhanceTranslations?: (sources: string[], drafts: string[]) => Promise<string[]>;
   private readonly practice?: CfProxyOptions['practice'];
+  private readonly submissionHistory?: CfProxyOptions['submissionHistory'];
   private authenticatedHandle = '';
 
   constructor(options: CfProxyOptions) {
@@ -164,6 +177,7 @@ export class CfProxy extends EventEmitter {
     this.writeClipboardText = options.writeClipboardText;
     this.enhanceTranslations = options.enhanceTranslations;
     this.practice = options.practice;
+    this.submissionHistory = options.submissionHistory;
   }
 
   get origin(): string {
@@ -805,6 +819,10 @@ export class CfProxy extends EventEmitter {
       await this.handleSubmissionStatus(parsed, req, res);
       return;
     }
+    if (parsed.pathname === '/__cf_inline/submission-history') {
+      await this.handleSubmissionHistory(parsed, req, res);
+      return;
+    }
     if (parsed.pathname === '/__cf_inline/fast') {
       this.writeFastMode(res, parsed.searchParams.get('path'));
       return;
@@ -1066,6 +1084,7 @@ function renderFilters(){var list=[['all','全部'],['favorite','已收藏'],['t
       this.writeJson(res, { error: '无效的代码提交请求' }, 403);
       return;
     }
+    let historyId = '';
     try {
       const chunks: Buffer[] = [];
       let size = 0;
@@ -1082,6 +1101,9 @@ function renderFilters(){var list=[['all','全部'],['favorite','已收藏'],['t
         contestId?: unknown;
         index?: unknown;
         programTypeId?: unknown;
+        language?: unknown;
+        requestId?: unknown;
+        previousSubmissionId?: unknown;
         source?: unknown;
       };
       if (
@@ -1098,6 +1120,25 @@ function renderFilters(){var list=[['all','全部'],['favorite','已收藏'],['t
       ) {
         throw new Error('代码提交参数无效');
       }
+      const requestedId = typeof payload.requestId === 'string' ? payload.requestId.trim() : '';
+      historyId = /^[A-Za-z0-9._:-]{8,100}$/.test(requestedId)
+        ? requestedId
+        : `submit-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const previousSubmissionId = /^\d+$/.test(String(payload.previousSubmissionId ?? ''))
+        ? String(payload.previousSubmissionId)
+        : undefined;
+      const history = this.submissionHistory
+        ? await this.submissionHistory.create({
+            id: historyId,
+            contestId: Number(payload.contestId),
+            index: payload.index.toUpperCase(),
+            programTypeId: payload.programTypeId,
+            language: typeof payload.language === 'string' ? payload.language : '',
+            status: 'submitting',
+            message: '正在通过 Edge 官方提交页面发送代码…',
+            previousSubmissionId,
+          })
+        : undefined;
       const response = await this.submitSolution({
         url: new URL(payload.submitPath, this.baseUrl).toString(),
         contestId: payload.contestId,
@@ -1105,15 +1146,30 @@ function renderFilters(){var list=[['all','全部'],['favorite','已收藏'],['t
         programTypeId: payload.programTypeId,
         source: payload.source,
       });
+      const outcome = classifyCodeforcesSubmissionResponse(response);
+      const updatedHistory = history
+        ? await this.submissionHistory?.update(history.id, outcome)
+        : undefined;
       this.writeJson(res, {
         status: response.statusCode,
         url: response.finalUrl,
         html: response.body.toString('utf8'),
+        history: updatedHistory,
       });
     } catch (err) {
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      const definitelyNotSent = /请先连接|不支持官方页面提交|代码提交参数无效|源代码过长/i.test(rawMessage);
+      const history = historyId && this.submissionHistory
+        ? await this.submissionHistory.update(historyId, {
+            status: definitelyNotSent ? 'failed' : 'unknown',
+            message: definitelyNotSent
+              ? `提交失败：${rawMessage}`
+              : `提交过程被中断，Codeforces 是否已接收暂时无法确认：${rawMessage}`,
+          }).catch(() => undefined)
+        : undefined;
       this.writeJson(
         res,
-        { error: err instanceof Error ? err.message : String(err) },
+        { error: rawMessage, history },
         502
       );
     }
@@ -1130,6 +1186,7 @@ function renderFilters(){var list=[['all','全部'],['favorite','已收藏'],['t
     }
     const contestId = parsed.searchParams.get('contestId') ?? '';
     const index = (parsed.searchParams.get('index') ?? '').toUpperCase();
+    const historyId = parsed.searchParams.get('historyId') ?? '';
     if (!/^\d+$/.test(contestId) || !/^[A-Z0-9]+$/.test(index)) {
       this.writeJson(res, { error: '题目参数无效' }, 400);
       return;
@@ -1159,14 +1216,79 @@ function renderFilters(){var list=[['all','全部'],['favorite','已收藏'],['t
       if (payload.status !== 'OK' || !Array.isArray(payload.result)) {
         throw new Error(payload.comment || 'Codeforces API 返回无效数据');
       }
-      const item = payload.result.find((entry) => {
+      const matchingItems = payload.result.filter((entry) => {
         const problem = entry.problem as Record<string, unknown> | undefined;
         return String(problem?.contestId ?? '') === contestId && String(problem?.index ?? '').toUpperCase() === index;
       });
-      this.writeJson(res, { submission: item ?? null });
+      let item: Record<string, unknown> | undefined = matchingItems[0];
+      let history: LocalSubmissionHistoryRecord | undefined;
+      if (historyId && this.submissionHistory) {
+        const existing = this.submissionHistory.get(historyId);
+        if (existing?.submissionId) {
+          item = matchingItems.find((entry) => String(entry.id ?? '') === existing.submissionId);
+        } else if (existing) {
+          const records = this.submissionHistory.list(Number(contestId), index, 100);
+          const usedIds = new Set(records.map((record) => record.submissionId).filter((id): id is string => !!id));
+          const attempts = records
+            .filter((record) => !record.submissionId
+              && /^(?:submitting|judging|unknown)$/.test(record.status)
+              && Math.abs(record.createdAt - existing.createdAt) <= 15 * 60_000)
+            .sort((left, right) => right.createdAt - left.createdAt);
+          const rank = Math.max(0, attempts.findIndex((record) => record.id === existing.id));
+          const available = matchingItems
+            .filter((entry) => {
+              const id = /^\d+$/.test(String(entry.id ?? '')) ? String(entry.id) : '';
+              const submittedAt = Number(entry.creationTimeSeconds) * 1000;
+              return !!id
+                && id !== existing.previousSubmissionId
+                && !usedIds.has(id)
+                && Number.isFinite(submittedAt)
+                && submittedAt >= existing.createdAt - 60_000
+                && submittedAt <= existing.createdAt + 15 * 60_000;
+            })
+            .sort((left, right) => Number(right.id) - Number(left.id));
+          item = available[rank];
+        }
+        const submissionId = item && /^\d+$/.test(String(item.id ?? '')) ? String(item.id) : '';
+        if (existing && item && submissionId && submissionId !== existing.previousSubmissionId) {
+          const verdict = String(item.verdict ?? '').toUpperCase();
+          const display = formatSubmissionVerdict(verdict);
+          const pending = !verdict || /^(?:TESTING|RUNNING|PENDING|IN_QUEUE)$/.test(verdict);
+          const time = item.timeConsumedMillis == null ? undefined : `${String(item.timeConsumedMillis)} ms`;
+          const memory = item.memoryConsumedBytes == null ? undefined : `${Math.round(Number(item.memoryConsumedBytes) / 1024)} KB`;
+          history = await this.submissionHistory.update(historyId, {
+            status: pending ? 'judging' : 'verdict',
+            submissionId,
+            verdict: verdict || 'PENDING',
+            time,
+            memory,
+            message: `提交 #${submissionId}：${display}${time ? ` · ${time}` : ''}${memory ? ` · ${memory}` : ''}`,
+          });
+        }
+      }
+      this.writeJson(res, { submission: item ?? null, history });
     } catch (err) {
       this.writeJson(res, { error: err instanceof Error ? err.message : String(err) }, 502);
     }
+  }
+
+  private async handleSubmissionHistory(
+    parsed: URL,
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    if (req.method !== 'GET' || req.headers['x-cf-inline'] !== 'submission-history') {
+      this.writeJson(res, { error: '无效的提交历史请求' }, 403);
+      return;
+    }
+    const contestIdText = parsed.searchParams.get('contestId') ?? '';
+    const index = (parsed.searchParams.get('index') ?? '').toUpperCase();
+    if (!/^\d+$/.test(contestIdText) || !/^[A-Z0-9]+$/.test(index)) {
+      this.writeJson(res, { error: '题目参数无效' }, 400);
+      return;
+    }
+    const records = this.submissionHistory?.list(Number(contestIdText), index, 20) ?? [];
+    this.writeJson(res, { records });
   }
 
   private writeJson(res: http.ServerResponse, data: unknown, status = 200): void {
@@ -1730,4 +1852,112 @@ function parseAttributes(tag: string): Record<string, string> {
     attrs[match[1]] = match[2] ?? match[3] ?? match[4] ?? '';
   }
   return attrs;
+}
+
+function decodeSubmissionMessage(value: string): string {
+  return value
+    .replace(/\\n/g, ' ')
+    .replace(/\\([\\"'])/g, '$1')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&quot;|&#34;/gi, '"')
+    .replace(/&apos;|&#39;/gi, "'")
+    .replace(/&lt;|&#60;/gi, '<')
+    .replace(/&gt;|&#62;/gi, '>')
+    .replace(/&amp;|&#38;/gi, '&')
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code: string) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number.parseInt(code, 10)))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isOfficialSubmissionSuccessMessage(value: string): boolean {
+  return /\bSolution\s+(?:(?:to|for)\s+)?(?:the\s+)?problem\s+[A-Za-z0-9]+\s+has\s+been\s+submitted\s+successfully\b/i.test(value)
+    || /Решение\s+задачи\s+[A-Za-zА-Яа-яЁё0-9]+\s+успешно\s+отправлено\s+на\s+проверку/i.test(value);
+}
+
+export function classifyCodeforcesSubmissionResponse(
+  response: CfTransportResponse
+): Partial<LocalSubmissionHistoryRecord> {
+  const html = response.body.toString('utf8');
+  if (response.statusCode >= 400) {
+    const detail = decodeSubmissionMessage(html).slice(0, 1500);
+    return {
+      status: 'failed',
+      message: `Codeforces 请求失败（HTTP ${response.statusCode}）${detail ? `：${detail}` : ''}`,
+    };
+  }
+  if (/id\s*=\s*["']enterForm["']/i.test(html)) {
+    return { status: 'failed', message: 'Codeforces 返回：登录状态已失效，请重新连接 Edge 后再试。' };
+  }
+
+  let successMessage = '';
+  const scriptPattern = /(?:Codeforces\.)?(showMessage|showError)\s*\(\s*(["'])([\s\S]*?)\2\s*\)/gi;
+  let scriptMatch: RegExpExecArray | null;
+  while ((scriptMatch = scriptPattern.exec(html))) {
+    const message = decodeSubmissionMessage(scriptMatch[3]);
+    if (!message) continue;
+    if (scriptMatch[1].toLowerCase() === 'showmessage' && isOfficialSubmissionSuccessMessage(message)) {
+      successMessage = message;
+      continue;
+    }
+    return { status: 'failed', message: `Codeforces 返回：${message}` };
+  }
+
+  const errorBlocks = html.match(/<(?:div|span|p)\b[^>]*class=["'][^"']*(?:genericError|submit-error|error)[^"']*["'][^>]*>[\s\S]*?<\/(?:div|span|p)>/gi) ?? [];
+  for (const block of errorBlocks) {
+    const message = decodeSubmissionMessage(block);
+    if (!message) continue;
+    if (isOfficialSubmissionSuccessMessage(message)) {
+      successMessage = message;
+      continue;
+    }
+    return { status: 'failed', message: `Codeforces 返回：${message}` };
+  }
+
+  const pageText = decodeSubmissionMessage(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' '));
+  const knownError = pageText.match(/(?:Source should differ from previously submitted|You have submitted (?:exactly )?the same code before|Duplicate submission|Source should be non-empty|You have no rights to submit|Contest is over|Registration is closed|Please complete the anti-bot verification)[^.!?\n]*(?:[.!?]|$)/i);
+  if (knownError) return { status: 'failed', message: `Codeforces 返回：${knownError[0].trim()}` };
+  if (successMessage || isOfficialSubmissionSuccessMessage(pageText)) {
+    const official = successMessage || pageText.match(/Solution[^.!?]*submitted successfully|Решение[^.!?]*отправлено на проверку/i)?.[0] || '提交已被接收';
+    return { status: 'judging', message: `Codeforces 已接收：${official}` };
+  }
+  if (/form\b[^>]*class=["'][^"']*submit-form/i.test(html)) {
+    return {
+      status: 'unknown',
+      message: 'Codeforces 返回了提交页面，但插件无法确认是否已接收。将继续检查提交记录。',
+    };
+  }
+  return {
+    status: 'unknown',
+    message: 'Codeforces 返回了结果，但插件无法确认是否提交成功。将继续检查提交记录。',
+  };
+}
+
+export function formatSubmissionVerdict(verdict: string): string {
+  const labels: Record<string, string> = {
+    OK: '通过',
+    ACCEPTED: '通过',
+    WRONG_ANSWER: '答案错误',
+    TIME_LIMIT_EXCEEDED: '超过时间限制',
+    MEMORY_LIMIT_EXCEEDED: '超过内存限制',
+    RUNTIME_ERROR: '运行错误',
+    COMPILATION_ERROR: '编译错误',
+    IDLENESS_LIMIT_EXCEEDED: '超过空闲时间限制',
+    SECURITY_VIOLATED: '安全检查失败',
+    CRASHED: '评测崩溃',
+    INPUT_PREPARATION_CRASHED: '测试数据准备失败',
+    CHALLENGED: '被成功挑战',
+    SKIPPED: '已跳过',
+    REJECTED: '已拒绝',
+    FAILED: '评测失败',
+    PARTIAL: '部分通过',
+    TESTING: '评测中',
+    RUNNING: '评测中',
+    PENDING: '等待评测',
+    IN_QUEUE: '等待评测',
+  };
+  const normalized = String(verdict || '').trim().toUpperCase();
+  return labels[normalized] || normalized || '等待评测';
 }

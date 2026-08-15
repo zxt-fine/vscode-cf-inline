@@ -1,6 +1,24 @@
 import * as vscode from 'vscode';
 
 export type PracticeStatus = 'todo' | 'doing' | 'review' | 'mastered';
+export type LocalSubmissionStatus = 'submitting' | 'judging' | 'verdict' | 'failed' | 'unknown';
+
+export interface LocalSubmissionHistoryRecord {
+  id: string;
+  contestId: number;
+  index: string;
+  programTypeId: string;
+  language: string;
+  status: LocalSubmissionStatus;
+  message: string;
+  previousSubmissionId?: string;
+  submissionId?: string;
+  verdict?: string;
+  time?: string;
+  memory?: string;
+  createdAt: number;
+  updatedAt: number;
+}
 
 export interface ProblemRecord {
   key: string;
@@ -59,7 +77,9 @@ export interface DashboardSummary {
 }
 
 export const PRACTICE_STATE_KEY = 'cfInline.practiceData.v1';
+export const SUBMISSION_HISTORY_STATE_KEY = 'cfInline.submissionHistory.v1';
 export const PRACTICE_STATUSES = new Set<PracticeStatus>(['todo', 'doing', 'review', 'mastered']);
+export const LOCAL_SUBMISSION_STATUSES = new Set<LocalSubmissionStatus>(['submitting', 'judging', 'verdict', 'failed', 'unknown']);
 
 export const CODEFORCES_TAG_ZH: Readonly<Record<string, string>> = {
   '2-sat': '2-SAT',
@@ -341,4 +361,92 @@ export function summarizeDashboard(data: DashboardData, days = 14): DashboardSum
     tags: tags.slice(0, 16),
     weakTags,
   };
+}
+
+function cleanHistoryText(value: unknown, limit: number): string {
+  return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, limit) : '';
+}
+
+function normalizeLocalSubmission(value: unknown): LocalSubmissionHistoryRecord | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const item = value as Partial<LocalSubmissionHistoryRecord>;
+  const id = cleanHistoryText(item.id, 100);
+  const contestId = Number(item.contestId);
+  const index = cleanHistoryText(item.index, 20).toUpperCase();
+  const status = LOCAL_SUBMISSION_STATUSES.has(item.status as LocalSubmissionStatus)
+    ? item.status as LocalSubmissionStatus
+    : 'unknown';
+  if (!/^[A-Za-z0-9._:-]{8,100}$/.test(id) || !Number.isInteger(contestId) || contestId <= 0 || !/^[A-Z0-9]+$/.test(index)) return undefined;
+  const createdAt = Number(item.createdAt);
+  const updatedAt = Number(item.updatedAt);
+  return {
+    id,
+    contestId,
+    index,
+    programTypeId: cleanHistoryText(item.programTypeId, 30),
+    language: cleanHistoryText(item.language, 120),
+    status,
+    message: cleanHistoryText(item.message, 2000),
+    previousSubmissionId: /^\d+$/.test(String(item.previousSubmissionId ?? '')) ? String(item.previousSubmissionId) : undefined,
+    submissionId: /^\d+$/.test(String(item.submissionId ?? '')) ? String(item.submissionId) : undefined,
+    verdict: cleanHistoryText(item.verdict, 100) || undefined,
+    time: cleanHistoryText(item.time, 100) || undefined,
+    memory: cleanHistoryText(item.memory, 100) || undefined,
+    createdAt: Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now(),
+    updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
+  };
+}
+
+export class SubmissionHistoryStore {
+  private records: LocalSubmissionHistoryRecord[];
+  private persistence = Promise.resolve();
+
+  constructor(private readonly state: vscode.Memento) {
+    const raw = state.get<unknown>(SUBMISSION_HISTORY_STATE_KEY);
+    const values = Array.isArray(raw) ? raw : [];
+    this.records = values.map(normalizeLocalSubmission).filter((item): item is LocalSubmissionHistoryRecord => !!item)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, 100);
+  }
+
+  get(id: string): LocalSubmissionHistoryRecord | undefined {
+    const item = this.records.find((record) => record.id === id);
+    return item ? { ...item } : undefined;
+  }
+
+  list(contestId?: number, index?: string, limit = 20): LocalSubmissionHistoryRecord[] {
+    const normalizedIndex = index?.trim().toUpperCase();
+    return this.records
+      .filter((record) => (!contestId || record.contestId === contestId) && (!normalizedIndex || record.index === normalizedIndex))
+      .slice(0, Math.max(1, Math.min(100, limit)))
+      .map((record) => ({ ...record }));
+  }
+
+  async create(input: Omit<LocalSubmissionHistoryRecord, 'createdAt' | 'updatedAt'>): Promise<LocalSubmissionHistoryRecord> {
+    const now = Date.now();
+    const record = normalizeLocalSubmission({ ...input, createdAt: now, updatedAt: now });
+    if (!record) throw new Error('提交历史参数无效');
+    const existing = this.records.findIndex((item) => item.id === record.id);
+    if (existing >= 0) this.records.splice(existing, 1);
+    this.records.unshift(record);
+    this.records = this.records.slice(0, 100);
+    await this.persist();
+    return { ...record };
+  }
+
+  async update(id: string, patch: Partial<LocalSubmissionHistoryRecord>): Promise<LocalSubmissionHistoryRecord | undefined> {
+    const index = this.records.findIndex((item) => item.id === id);
+    if (index < 0) return undefined;
+    const next = normalizeLocalSubmission({ ...this.records[index], ...patch, id, updatedAt: Date.now() });
+    if (!next) throw new Error('提交历史更新参数无效');
+    this.records[index] = next;
+    await this.persist();
+    return { ...next };
+  }
+
+  private persist(): Promise<void> {
+    const snapshot = this.records.map((record) => ({ ...record }));
+    this.persistence = this.persistence.then(() => this.state.update(SUBMISSION_HISTORY_STATE_KEY, snapshot));
+    return this.persistence;
+  }
 }

@@ -83,6 +83,9 @@ async function main() {
         originalSampleCopyButtons: translationToggle?.originalSampleCopyCount === 2,
         translatedSampleCopyButtons: translationToggle?.translatedSampleCopyCount === 2,
         translatedSampleCopyClickable: translationToggle?.translatedSampleCopyText === '已复制',
+        translatedSampleTitles: translationToggle?.translatedSampleTitles?.join(',') === '输入,输出',
+        originalOfficialCopyHidden: !translationToggle?.originalOfficialCopyVisible,
+        translatedOfficialCopyHidden: !translationToggle?.translatedOfficialCopyVisible,
         noRetypeset: translationToggle?.typesetCalls === 0,
         noMarkerLeak: !translationToggle?.leakedMarker,
         noBracketArtifact: !translationToggle?.leakedBracketArtifact,
@@ -132,10 +135,14 @@ async function main() {
         || !linkedTitleTranslation.translatedText.includes('ICPC 挑战赛由华为提供支持')) {
         throw new Error(`Linked announcement title translation navigated away or failed: ${JSON.stringify(linkedTitleTranslation)}`);
       }
+      const spoilerToggle = rendered.pageState?.spoilerToggle;
+      if (!spoilerToggle?.opened || !spoilerToggle.closed) {
+        throw new Error(`Codeforces spoiler fallback did not expand and collapse content: ${JSON.stringify(spoilerToggle)}`);
+      }
       const inlineSubmit = rendered.pageState?.inlineSubmit;
       if (!inlineSubmit?.success
         || inlineSubmit.languageCount < 2
-        || !inlineSubmit.nativeSuccess) {
+        || !inlineSubmit.nativeAccepted) {
         throw new Error(`Synthetic submit UI or native form repair failed: ${JSON.stringify(inlineSubmit)}`);
       }
       const responsive = rendered.pageState?.responsive;
@@ -201,7 +208,9 @@ function syntheticSession() {
     <div style="font: 24px sans-serif; color: #123">Groups content is visible</div>
     <div id="globalEnglish" class="ttypography"><p>This is an English announcement outside the problem statement.</p><ol><li>First solver: tourist</li><li>Second solver: Benq</li></ol></div>
     <a id="linkedTopic" href="/blog/entry/1"><div id="linkedEnglish" class="ttypography"><h1>ICPC Challenge powered by Huawei</h1><p>By ICPCNews, 9 days ago.</p></div></a>
-    <section class="problem-statement"><div class="header"><div>time limit per test</div></div><div><p class="version-note"><span class="tex-font-style-bf">This is the hard version of the problem. The only difference between the two versions is the set of allowed values for the initial array and for </span><span class="MathJax_Preview"></span><span class="MathJax"><span>x rendered</span></span><script type="math/tex">x</script><span class="tex-font-style-bf"> in operations of type 1. In this version, these values can be any integers in </span><span class="MathJax_Preview"></span><span class="MathJax"><span>range rendered</span></span><script type="math/tex">[-10^9,10^9]</script><span class="tex-font-style-bf">. You can make hacks only if both versions of the problem are solved.</span></p><p><strong>This is the Easy version of the problem. The constraints in this version are smaller.</strong></p><p class="unknown-version-note"><strong>This is the hard version of the problem. A special rule uses </strong><span class="MathJax"><span>special rendered</span></span><script type="math/tex">special</script><strong>. You can hack only after solving every required version.</strong></p><p>Hello problem statement. <span class="MathJax_Preview"></span><span class="MathJax"><span>2n rendered</span></span><script type="math/tex">2n</script> Additional explanation after the formula.</p><p>They play for n rounds. Ajisai moves on odd-numbered rounds and Mai moves on even-numbered rounds. On each round, the player who is to move may swap a_i and b_i, or pass.</p><p>Determine the outcome of the game with optimal play. More formally, one player is considered to win if a strategy always succeeds regardless of the opponent's choices.</p><code>int x;</code></div><div class="sample-tests"><div class="section-title">Examples</div><div class="input"><div class="title">Input</div><pre><div class="test-example-line">1 2</div></pre></div><div class="output"><div class="title">Output</div><pre><div class="test-example-line">3</div></pre></div></div></section>
+    <div id="spoiler-fixture" class="spoiler"><div class="spoiler-title">Hint 1</div><div class="spoiler-content" style="display:none"><p>隐藏的提示内容</p></div></div>
+    <section class="problem-statement"><div class="header"><div>time limit per test</div></div><div><p class="version-note"><span class="tex-font-style-bf">This is the hard version of the problem. The only difference between the two versions is the set of allowed values for the initial array and for </span><span class="MathJax_Preview"></span><span class="MathJax"><span>x rendered</span></span><script type="math/tex">x</script><span class="tex-font-style-bf"> in operations of type 1. In this version, these values can be any integers in </span><span class="MathJax_Preview"></span><span class="MathJax"><span>range rendered</span></span><script type="math/tex">[-10^9,10^9]</script><span class="tex-font-style-bf">. You can make hacks only if both versions of the problem are solved.</span></p><p><strong>This is the Easy version of the problem. The constraints in this version are smaller.</strong></p><p class="unknown-version-note"><strong>This is the hard version of the problem. A special rule uses </strong><span class="MathJax"><span>special rendered</span></span><script type="math/tex">special</script><strong>. You can hack only after solving every required version.</strong></p><p>Hello problem statement. <span class="MathJax_Preview"></span><span class="MathJax"><span>2n rendered</span></span><script type="math/tex">2n</script> Additional explanation after the formula.</p><p>They play for n rounds. Ajisai moves on odd-numbered rounds and Mai moves on even-numbered rounds. On each round, the player who is to move may swap a_i and b_i, or pass.</p><p>Determine the outcome of the game with optimal play. More formally, one player is considered to win if a strategy always succeeds regardless of the opponent's choices.</p><code>int x;</code></div><div class="sample-tests"><div class="section-title">Examples</div><div class="input"><div class="title">Input<div class="input-output-copier">Copy</div></div><pre><div class="test-example-line">1 2</div></pre></div><div class="output"><div class="title">Output<div class="input-output-copier">Copy</div></div><pre><div class="test-example-line">3</div></pre></div></div></section>
+    <form id="native-submit-fixture" class="submit-form" action="/group/test-group/contest/123/submit"><input type="hidden" name="contestId" value="123"><input type="hidden" name="submittedProblemIndex" value="A"><select name="programTypeId"><option value="89" selected>GNU G++20</option></select><textarea name="source">abc</textarea><button type="submit">Submit</button></form>
     <div style="height:600px"></div><div id="wheel-horizontal" style="box-sizing:border-box;width:240px;height:70px;overflow-x:auto;overflow-y:hidden"><div style="width:900px;height:60px">Horizontal-only scroll fixture</div></div><div style="height:120px"></div><div id="wheel-vertical" style="box-sizing:border-box;width:240px;height:100px;overflow-y:auto"><div style="height:600px">Vertical scroll fixture</div></div><div style="height:800px"></div></main></div>
     <script>if (window.parent.frames.length > 0) { window.stop(); }</script>
     <footer>Rendered footer</footer></div>
@@ -320,6 +329,10 @@ async function renderInEdge(url) {
     if (pageTarget?.webSocketDebuggerUrl) {
       const cdp = await connectCdp(pageTarget.webSocketDebuggerUrl);
       try {
+        const executionContexts = [];
+        cdp.on('Runtime.executionContextCreated', (params) => executionContexts.push(params.context));
+        await cdp.send('Runtime.enable');
+        await new Promise((resolve) => setTimeout(resolve, 100));
         pageState = await cdp.send('Runtime.evaluate', {
           expression: `({
             title: document.title,
@@ -358,6 +371,7 @@ async function renderInEdge(url) {
           });
           inspectedFrames.push({ frame, inspected });
           if (frame.url.includes('/groups/my') || frame.url.includes('/group/test-group/contest/123/problem/A')) {
+            const mainContext = executionContexts.find((context) => context.auxData?.frameId === frame.id && context.auxData?.isDefault)?.id || world.executionContextId;
             const toggled = await cdp.send('Runtime.evaluate', {
               contextId: world.executionContextId,
               expression: `(async () => {
@@ -392,6 +406,9 @@ async function renderInEdge(url) {
                   originalSampleCopyCount: document.querySelectorAll('.problem-statement:not(.cf-inline-translated-statement) .cf-inline-sample-copy').length,
                   translatedSampleCopyCount: document.querySelectorAll('.cf-inline-translated-statement .cf-inline-sample-copy').length,
                   translatedSampleCopyText: translatedCopy?.textContent,
+                  translatedSampleTitles: Array.from(document.querySelectorAll('.cf-inline-translated-statement .sample-tests .title')).map((title) => String(title.firstChild?.nodeValue || '').trim()),
+                  originalOfficialCopyVisible: Array.from(document.querySelectorAll('.problem-statement:not(.cf-inline-translated-statement) .input-output-copier')).some((copy) => getComputedStyle(copy).display !== 'none'),
+                  translatedOfficialCopyVisible: Array.from(document.querySelectorAll('.cf-inline-translated-statement .input-output-copier')).some((copy) => getComputedStyle(copy).display !== 'none'),
                   buttonText: button.textContent
                 };
               })()`,
@@ -445,8 +462,25 @@ async function renderInEdge(url) {
               returnByValue: true,
             });
             pageState.linkedTitleTranslation = linkedTitleTranslated.result?.value;
-            const submitted = await cdp.send('Runtime.evaluate', {
+            const spoilerToggled = await cdp.send('Runtime.evaluate', {
               contextId: world.executionContextId,
+              expression: `(async () => {
+                const spoiler = document.getElementById('spoiler-fixture');
+                const title = spoiler?.querySelector('.spoiler-title');
+                const content = spoiler?.querySelector('.spoiler-content');
+                if (!title || !content) return null;
+                title.click(); await new Promise((resolve) => setTimeout(resolve, 80));
+                const opened = getComputedStyle(content).display !== 'none' && spoiler.classList.contains('open') && title.getAttribute('aria-expanded') === 'true';
+                title.click(); await new Promise((resolve) => setTimeout(resolve, 80));
+                const closed = getComputedStyle(content).display === 'none' && !spoiler.classList.contains('open') && title.getAttribute('aria-expanded') === 'false';
+                return { opened, closed };
+              })()`,
+              awaitPromise: true,
+              returnByValue: true,
+            });
+            pageState.spoilerToggle = spoilerToggled.result?.value;
+            const submitted = await cdp.send('Runtime.evaluate', {
+              contextId: mainContext,
               expression: `(async () => {
                 const deadline = Date.now() + 10000;
                 while (!document.querySelector('.cf-inline-submit-form') && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
@@ -455,17 +489,15 @@ async function renderInEdge(url) {
                 inlineForm.querySelector('textarea[name="source"]').value = 'int main() { return 0; }';
                 inlineForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
                 while (!/Codeforces 已接收代码/.test(document.querySelector('.cf-inline-submit-status')?.textContent || '') && !document.querySelector('.cf-inline-submit-status.is-error') && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
-                const native = document.createElement('form'); native.className = 'submit-form'; native.action = '/group/test-group/contest/123/submit';
-                native.innerHTML = '<input type="hidden" name="contestId" value="123"><input type="hidden" name="submittedProblemIndex" value="A"><select name="programTypeId"><option value="89" selected>GNU G++20</option></select><textarea name="source">abc</textarea><button type="submit">Submit</button>';
-                document.body.appendChild(native);
-                native.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                const native = document.getElementById('native-submit-fixture');
+                native.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
                 const nativeDeadline = Date.now() + 5000;
-                while (!native.querySelector('.cf-inline-native-submit-status.is-success') && !native.querySelector('.cf-inline-native-submit-status.is-error') && Date.now() < nativeDeadline) await new Promise((resolve) => setTimeout(resolve, 100));
+                while (!/Codeforces 已接收代码/.test(native.querySelector('.cf-inline-native-submit-status')?.textContent || '') && !native.querySelector('.cf-inline-native-submit-status.is-error') && Date.now() < nativeDeadline) await new Promise((resolve) => setTimeout(resolve, 100));
                 return {
                   success: /Codeforces 已接收代码/.test(document.querySelector('.cf-inline-submit-status')?.textContent || ''),
                   status: document.querySelector('.cf-inline-submit-status')?.textContent,
                   languageCount: inlineForm.querySelectorAll('select[name="programTypeId"] option').length,
-                  nativeSuccess: !!native.querySelector('.cf-inline-native-submit-status.is-success'),
+                  nativeAccepted: /Codeforces 已接收代码/.test(native.querySelector('.cf-inline-native-submit-status')?.textContent || ''),
                   nativeStatus: native.querySelector('.cf-inline-native-submit-status')?.textContent
                 };
               })()`,
@@ -629,8 +661,13 @@ class CdpClient {
     this.socket = socket;
     this.nextId = 0;
     this.pending = new Map();
+    this.listeners = new Map();
     socket.on('message', (data) => {
       const message = JSON.parse(data.toString());
+      if (!message.id) {
+        for (const listener of this.listeners.get(message.method) || []) listener(message.params || {});
+        return;
+      }
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
@@ -644,6 +681,11 @@ class CdpClient {
       this.pending.set(id, { resolve, reject });
       this.socket.send(JSON.stringify({ id, method, params }));
     });
+  }
+  on(method, listener) {
+    const listeners = this.listeners.get(method) || [];
+    listeners.push(listener);
+    this.listeners.set(method, listeners);
   }
   close() { this.socket.close(); }
 }

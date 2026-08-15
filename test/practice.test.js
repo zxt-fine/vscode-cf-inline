@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { parseOfficialSolvedAllTime, PracticeStore, summarizeDashboard, translateCodeforcesTag } = require('../out/practice.js');
+const { parseOfficialSolvedAllTime, PracticeStore, SubmissionHistoryStore, summarizeDashboard, translateCodeforcesTag } = require('../out/practice.js');
 
 class MemoryMemento {
   constructor() { this.values = new Map(); }
@@ -74,4 +74,32 @@ test('parses the all-time solved count from the Codeforces profile activity fram
   const html = '<div class="_UserActivityFrame_counter"><div class="_UserActivityFrame_counterValue">1,234 problems</div><div class="_UserActivityFrame_counterDescription">solved for all time</div></div>';
   assert.equal(parseOfficialSolvedAllTime(html), 1234);
   assert.equal(parseOfficialSolvedAllTime('<div>293 problems solved for the last year</div>'), undefined);
+});
+
+test('persists bounded submission history without storing source code', async () => {
+  const memory = new MemoryMemento();
+  const store = new SubmissionHistoryStore(memory);
+  const created = await store.create({
+    id: 'submit-history-001', contestId: 1, index: 'a', programTypeId: '89',
+    language: 'GNU C++20', status: 'submitting', message: '正在提交', previousSubmissionId: '100',
+    source: 'this field must never be stored',
+  });
+  assert.equal(created.index, 'A');
+  assert.equal(created.source, undefined);
+  const updated = await store.update(created.id, { status: 'verdict', verdict: 'OK', message: '提交 #101：通过' });
+  assert.equal(updated.createdAt, created.createdAt);
+  assert.ok(updated.updatedAt >= created.updatedAt);
+  const restored = new SubmissionHistoryStore(memory).get(created.id);
+  assert.equal(restored.verdict, 'OK');
+  assert.equal(restored.source, undefined);
+
+  for (let index = 0; index < 105; index++) {
+    await store.create({
+      id: `submit-history-${String(index + 200).padStart(3, '0')}`,
+      contestId: index % 2 ? 1 : 2, index: 'B', programTypeId: '89', language: 'GNU C++20',
+      status: 'failed', message: 'Codeforces 返回：测试错误',
+    });
+  }
+  assert.equal(store.list(undefined, undefined, 100).length, 100);
+  assert.ok(store.list(1, 'b', 100).every((record) => record.contestId === 1 && record.index === 'B'));
 });

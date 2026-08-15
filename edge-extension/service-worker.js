@@ -12,6 +12,17 @@ let socket;
 let heartbeat;
 let executionTabId;
 let executionTabOwned = false;
+let sessionPublishTimer;
+
+function sendBridgeMessage(channel, message) {
+  if (!channel || channel.readyState !== WebSocket.OPEN) return false;
+  try {
+    channel.send(JSON.stringify(message));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function isAuthorizedCodeforcesUrl(value) {
   try {
@@ -52,32 +63,37 @@ function tryPort(index) {
     return;
   }
   const candidate = new WebSocket(`ws://127.0.0.1:${PORTS[index]}${BRIDGE_PATH}`);
+  // Record CONNECTING sockets as well as OPEN sockets. Extension startup,
+  // alarms and content-script wakeups can otherwise start several parallel
+  // port scans before the first WebSocket reaches onopen. Those connections
+  // then replace one another and interrupt an active login or page request.
+  socket = candidate;
   let opened = false;
   candidate.onopen = () => {
     opened = true;
-    socket = candidate;
     clearInterval(heartbeat);
     heartbeat = setInterval(() => {
-      if (candidate.readyState === WebSocket.OPEN) candidate.send(JSON.stringify({ type: 'heartbeat' }));
+      sendBridgeMessage(candidate, { type: 'heartbeat' });
     }, 20000);
     chrome.action.setBadgeText({ text: 'ON' });
     chrome.action.setBadgeBackgroundColor({ color: '#16883f' });
     // Confirm the bridge protocol immediately. Reading cookies and inspecting
     // a Codeforces tab can be slow, so publish that state separately instead
     // of making the protocol handshake wait for page inspection.
-    candidate.send(JSON.stringify({
+    sendBridgeMessage(candidate, {
       type: 'ready',
       protocol: BRIDGE_PROTOCOL,
       extensionVersion: chrome.runtime.getManifest().version,
       userAgent: navigator.userAgent,
       valid: false
-    }));
+    });
     publishSession(candidate, 'sessionState');
   };
   candidate.onmessage = (event) => handleMessage(candidate, event.data);
   candidate.onerror = () => undefined;
   candidate.onclose = () => {
-    if (socket === candidate) socket = undefined;
+    if (socket !== candidate) return;
+    socket = undefined;
     clearInterval(heartbeat);
     chrome.action.setBadgeText({ text: 'OFF' });
     chrome.action.setBadgeBackgroundColor({ color: '#b3261e' });
@@ -92,28 +108,33 @@ async function publishSession(channel = socket, type = 'sessionState') {
     const cookies = await codeforcesCookies();
     const cookieValid = cookies.some((cookie) => cookie.name === 'X-User-Sha1' && /^[0-9a-f]{40}$/i.test(cookie.value) && !/^0+$/.test(cookie.value));
     const pageValid = !!(await findAuthenticatedTab());
-    channel.send(JSON.stringify({
+    sendBridgeMessage(channel, {
       type,
       protocol: BRIDGE_PROTOCOL,
       cookies: exportedCookies(cookies),
       userAgent: navigator.userAgent,
       valid: cookieValid || pageValid
-    }));
+    });
   } catch (error) {
-    channel.send(JSON.stringify({ type, protocol: BRIDGE_PROTOCOL, valid: false, error: error instanceof Error ? error.message : String(error) }));
+    sendBridgeMessage(channel, { type, protocol: BRIDGE_PROTOCOL, valid: false, error: error instanceof Error ? error.message : String(error) });
   }
+}
+
+function scheduleSessionPublish(delayMs = 250) {
+  clearTimeout(sessionPublishTimer);
+  sessionPublishTimer = setTimeout(() => publishSession(), delayMs);
 }
 
 async function handleMessage(channel, raw) {
   let message;
   try { message = JSON.parse(raw); } catch { return; }
   if (message.type !== 'task' || typeof message.id !== 'number') return;
-  const progress = (text) => channel.send(JSON.stringify({ type: 'progress', id: message.id, message: text }));
+  const progress = (text) => sendBridgeMessage(channel, { type: 'progress', id: message.id, message: text });
   try {
     const value = await runTask(message.action, message.payload || {}, progress);
-    channel.send(JSON.stringify({ type: 'result', id: message.id, ok: true, value }));
+    sendBridgeMessage(channel, { type: 'result', id: message.id, ok: true, value });
   } catch (error) {
-    channel.send(JSON.stringify({ type: 'result', id: message.id, ok: false, error: error instanceof Error ? error.message : String(error) }));
+    sendBridgeMessage(channel, { type: 'result', id: message.id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 }
 
@@ -174,8 +195,16 @@ async function findAuthenticatedTab() {
         target: { tabId: tab.id },
         func: () => ({
           anonymous: /^\/enter(?:\/|$)/i.test(location.pathname) || !!document.querySelector('#enterForm'),
-          authenticated: !!document.querySelector('a[href*="/logout"]') &&
-            (!!document.querySelector('a[href*="/profile/"]') || /^\/profile\/[^/]+\/?$/i.test(location.pathname)),
+          authenticated: (() => {
+            const login = document.querySelector('a[href*="/enter"], #enterForm');
+            const logout = document.querySelector('a[href*="/logout"], form[action*="/logout"]');
+            const profile = document.querySelector('a[href*="/profile/"]');
+            // Codeforces occasionally renders logout as a form or omits it
+            // while rebuilding the top navigation after login. A profile link
+            // with no login control is still positive rendered-page evidence;
+            // an anonymous visitor on somebody else's profile keeps /enter.
+            return !!profile && (!!logout || !login);
+          })(),
           challenged: /Just a moment|Checking your browser|请稍候/i.test(document.title) || !!document.querySelector('[id*="challenge"],script[src*="challenge-platform"]')
         })
       });
@@ -421,11 +450,23 @@ chrome.runtime.onInstalled.addListener(connect);
 chrome.runtime.onStartup.addListener(connect);
 chrome.alarms.create('cfInlineReconnect', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === 'cfInlineReconnect') connect(); });
-chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === 'cfInlineWake') connect();
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message?.type === 'cfInlineWake') {
+    connect();
+    if (isAuthorizedCodeforcesUrl(sender?.tab?.url || sender?.url || '')) scheduleSessionPublish(350);
+  }
 });
 chrome.cookies.onChanged.addListener((change) => {
-  if (/codeforces\.com$/i.test(String(change.cookie?.domain || '').replace(/^\./, ''))) publishSession();
+  if (/codeforces\.com$/i.test(String(change.cookie?.domain || '').replace(/^\./, ''))) scheduleSessionPublish();
+});
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+  // A successful login may only change the rendered account controls while
+  // the long-lived cookie remains unchanged. Re-check the page after every
+  // completed Codeforces navigation so VS Code is notified immediately.
+  const targetUrl = String(changeInfo.url || tab?.url || '');
+  if (isAuthorizedCodeforcesUrl(targetUrl) && (changeInfo.status === 'complete' || !!changeInfo.url)) {
+    scheduleSessionPublish(changeInfo.status === 'complete' ? 100 : 500);
+  }
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabId === executionTabId) void clearExecutionTab();
