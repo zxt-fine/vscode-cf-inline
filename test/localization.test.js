@@ -234,6 +234,12 @@ test('builds independent Chinese UI localization and protected statement transla
   assert.match(script, /resumeSubmissionHistory/);
   assert.match(script, /historyId=/);
   assert.match(script, /readLatestSubmissionApi/);
+  assert.match(script, /if\(historyId\)throw apiError/);
+  assert.match(script, /result\.history\.submissionId/);
+  assert.match(script, /function extractSubmitFailureMessage/);
+  assert.match(script, /function submissionResultError/);
+  assert.match(script, /fieldFailure=extractSubmitFailureMessage/);
+  assert.match(script, /submitError=submissionResultError/);
   assert.match(script, /parseSubmissionRows\(String\(response\.html\|\|''\),route\)/);
   assert.match(script, /new AbortController\(\)/);
   assert.match(script, /controller\.abort\(\)/);

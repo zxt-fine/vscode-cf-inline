@@ -373,9 +373,17 @@ function normalizeLocalSubmission(value: unknown): LocalSubmissionHistoryRecord 
   const id = cleanHistoryText(item.id, 100);
   const contestId = Number(item.contestId);
   const index = cleanHistoryText(item.index, 20).toUpperCase();
-  const status = LOCAL_SUBMISSION_STATUSES.has(item.status as LocalSubmissionStatus)
+  let status = LOCAL_SUBMISSION_STATUSES.has(item.status as LocalSubmissionStatus)
     ? item.status as LocalSubmissionStatus
     : 'unknown';
+  let message = cleanHistoryText(item.message, 2000);
+  // Versions through 0.11.34 could mistake this unrelated Codeforces UI
+  // persistence warning for a submission rejection. Re-open those records for
+  // official status recovery instead of permanently displaying a false error.
+  if (status === 'failed' && /Failed to save collapsed state\.?/i.test(message)) {
+    status = 'unknown';
+    message = '提交结果待确认：已忽略与提交无关的页面折叠状态提示，正在重新查询 Codeforces 记录。';
+  }
   if (!/^[A-Za-z0-9._:-]{8,100}$/.test(id) || !Number.isInteger(contestId) || contestId <= 0 || !/^[A-Z0-9]+$/.test(index)) return undefined;
   const createdAt = Number(item.createdAt);
   const updatedAt = Number(item.updatedAt);
@@ -386,7 +394,7 @@ function normalizeLocalSubmission(value: unknown): LocalSubmissionHistoryRecord 
     programTypeId: cleanHistoryText(item.programTypeId, 30),
     language: cleanHistoryText(item.language, 120),
     status,
-    message: cleanHistoryText(item.message, 2000),
+    message,
     previousSubmissionId: /^\d+$/.test(String(item.previousSubmissionId ?? '')) ? String(item.previousSubmissionId) : undefined,
     submissionId: /^\d+$/.test(String(item.submissionId ?? '')) ? String(item.submissionId) : undefined,
     verdict: cleanHistoryText(item.verdict, 100) || undefined,

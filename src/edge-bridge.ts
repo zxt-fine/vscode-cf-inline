@@ -18,9 +18,10 @@ const BRIDGE_PORT_START = 27121;
 const BRIDGE_PORT_END = 27130;
 const BRIDGE_PATH = '/cf-inline-edge-bridge';
 const EDGE_EXTENSION_ID = 'gdbpfejeiompakehnjkeggmimbomepgk';
-const BRIDGE_PROTOCOL = 3;
+const BRIDGE_PROTOCOL = 5;
 const TASK_TIMEOUT_MS = 120_000;
-const RECONNECT_GRACE_MS = 6_000;
+const RECONNECT_GRACE_MS = 45_000;
+const REQUEST_RECONNECT_WAIT_MS = 12_000;
 
 interface BridgeResult {
   cookies?: BrowserCookie[];
@@ -314,7 +315,7 @@ class EdgeBridgeTransport implements CfUpstreamTransport {
     if (this.disposed) throw new Error('日常 Edge 会话已断开');
     if (this.bridge.connected) return;
     if (!this.bridge.reconnecting) throw new Error('日常 Edge 会话已断开');
-    await this.bridge.waitForConnection(RECONNECT_GRACE_MS);
+    await this.bridge.waitForConnection(REQUEST_RECONNECT_WAIT_MS);
   }
 
   async hasValidLoginCookie(): Promise<boolean> {
@@ -340,6 +341,7 @@ class EdgeBridgeTransport implements CfUpstreamTransport {
       if (!retryable || !this.isAlive() || !isTransientBridgeRequestError(error)) throw error;
       await new Promise((resolve) => setTimeout(resolve, 180));
       if (!this.isAlive()) throw error;
+      await this.ensureConnected();
       return decodeResponse(await this.bridge.run('request', payload, timeoutMs));
     }
   }

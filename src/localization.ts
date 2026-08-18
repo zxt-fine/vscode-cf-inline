@@ -1251,7 +1251,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
           return submitThroughOfficialEdge({requestId:requestId,submitPath:actionUrl.pathname,contestId:contestId,index:problemIndex,programTypeId:programTypeId,language:language&&language.options&&language.options[language.selectedIndex]?language.options[language.selectedIndex].text:'',previousSubmissionId:previousId,source:code}).then(function(result){return {result:result,previousId:previousId,historyId:result.history&&result.history.id||requestId};});
         }).then(function(submitted){
           var result=submitted.result;
-          var message=readSubmitError(String(result.html||''),Number(result.status||200));if(message)throw new Error(message);
+          var submitError=submissionResultError(result);if(submitError)throw submitError;
           status.className='cf-inline-submit-status cf-inline-native-submit-status is-loading';status.textContent='Codeforces 已接收代码，正在等待评测结果…';
           loadSubmissionHistory(route,historyPanel,false);pollSubmissionResult(route,submitted.previousId,status,Date.now(),function(){return document.contains(form);},submitted.historyId,historyPanel);
         }).catch(function(error){status.className='cf-inline-submit-status cf-inline-native-submit-status '+(error&&error.history&&error.history.status==='unknown'?'is-loading':'is-error');status.textContent=(error&&error.history&&error.history.status==='unknown'?'提交状态待确认：':'提交失败：')+String(error&&error.message||error);loadSubmissionHistory(route,historyPanel,true);}).finally(function(){
@@ -1329,6 +1329,21 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       value=String(value||'');
       return /\\bSolution\\s+(?:(?:to|for)\\s+)?(?:the\\s+)?problem\\s+[A-Za-z0-9]+\\s+has\\s+been\\s+submitted\\s+successfully\\b/i.test(value)||/Решение\\s+задачи\\s+[A-Za-zА-Яа-яЁё0-9]+\\s+успешно\\s+отправлено\\s+на\\s+проверку/i.test(value);
     }
+    function extractSubmitFailureMessage(value){
+      var match=String(value||'').match(/(?:Source should differ from previously submitted|You have submitted (?:exactly )?the same code before|Duplicate submission|Source should be non-empty|You have no rights to submit|Contest is over|Registration is closed|Please complete the anti-bot verification)[^.!?\\n]*(?:[.!?]|$)/i);
+      return match?cleanSubmitMessage(match[0]):'';
+    }
+    function submissionResultError(result){
+      var history=result&&result.history;
+      if(history){
+        if(history.status==='failed'){
+          var failure=new Error(history.message||'Codeforces 拒绝了本次提交');failure.history=history;return failure;
+        }
+        return null;
+      }
+      var message=readSubmitError(String(result&&result.html||''),Number(result&&result.status||200));
+      return message?new Error(message):null;
+    }
     function readSubmitError(html,statusCode){
       var parsed=new DOMParser().parseFromString(html,'text/html');
       if(Number(statusCode)>=400){
@@ -1343,18 +1358,19 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       var successMessage='';
       for(var errorIndex=0;errorIndex<errors.length;errorIndex++){
         var text=cleanSubmitMessage(errors[errorIndex].getAttribute('data-error')||errors[errorIndex].textContent);
-        if(text&&text.length<=1500){if(isSubmitSuccessMessage(text)){successMessage=text;continue;}return text;}
+        if(text&&text.length<=1500){if(isSubmitSuccessMessage(text)){successMessage=text;continue;}var fieldFailure=extractSubmitFailureMessage(text);if(fieldFailure)return fieldFailure;}
       }
-      var scriptMessage=html.match(/(?:Codeforces\\.)?(showMessage|showError)\\s*\\(\\s*(["'])([\\s\\S]*?)\\2\\s*\\)/i);
-      if(scriptMessage){
+      var scriptPattern=/(?:Codeforces\\.)?(showMessage|showError)\\s*\\(\\s*(["'])([\\s\\S]*?)\\2\\s*\\)/gi;
+      var scriptMessage;
+      while((scriptMessage=scriptPattern.exec(html))){
         var decoded=scriptMessage[3].replace(/\\\\n/g,' ').replace(/\\\\([\\\\"'])/g,'$1');
         decoded=cleanSubmitMessage(new DOMParser().parseFromString('<body>'+decoded,'text/html').body.textContent);
-        if(decoded){if(scriptMessage[1].toLowerCase()==='showmessage'&&isSubmitSuccessMessage(decoded)) successMessage=decoded;else return decoded;}
+        if(decoded){if(scriptMessage[1].toLowerCase()==='showmessage'&&isSubmitSuccessMessage(decoded)){successMessage=decoded;continue;}var scriptFailure=extractSubmitFailureMessage(decoded);if(scriptFailure)return scriptFailure;}
       }
       parsed.querySelectorAll('script,style,noscript,template').forEach(function(node){node.remove();});
       var pageText=cleanSubmitMessage(parsed.body&&parsed.body.textContent);
-      var knownError=pageText.match(/(?:Source should differ from previously submitted|You have submitted (?:exactly )?the same code before|Duplicate submission|Source should be non-empty|You have no rights to submit|Contest is over|Registration is closed)[^.!?\\n]*(?:[.!?]|$)/i);
-      if(knownError) return cleanSubmitMessage(knownError[0]);
+      var knownError=extractSubmitFailureMessage(pageText);
+      if(knownError) return knownError;
       if(successMessage||isSubmitSuccessMessage(pageText)) return '';
       if(parsed.querySelector('form.submit-form')) return 'Codeforces 返回了提交页面，但没有确认提交成功。请检查题号、语言和代码内容。';
       return '';
@@ -1423,7 +1439,12 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       finally{clearTimeout(timer);}
       var result=await response.json().catch(function(){return{};});
       if(!response.ok)throw new Error(result.error||('HTTP '+response.status));
-      var item=result.submission;if(!item||!item.id)return result.history?{history:result.history}:null;
+      var item=result.submission;
+      if((!item||!item.id)&&result.history&&result.history.submissionId){
+        var savedDisplay=verdictDisplay(result.history.verdict||'',result.history.message||'');
+        return {id:String(result.history.submissionId),href:route.submissionsPath,label:savedDisplay.label,pending:result.history.status==='submitting'||result.history.status==='judging'||result.history.status==='unknown'||savedDisplay.pending,accepted:savedDisplay.accepted,time:result.history.time||'',memory:result.history.memory||'',history:result.history};
+      }
+      if(!item||!item.id)return result.history?{history:result.history}:null;
       var display=verdictDisplay(item.verdict||'',item.verdict||'');
       return {id:String(item.id),href:route.submissionsPath,label:display.label,pending:display.pending,accepted:display.accepted,time:item.timeConsumedMillis!=null?String(item.timeConsumedMillis)+' ms':'',memory:item.memoryConsumedBytes!=null?Math.round(Number(item.memoryConsumedBytes)/1024)+' KB':'',history:result.history};
     }
@@ -1444,7 +1465,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
       async function check(){
         if(!isActive(sequence))return;
         try{
-          var record;try{record=await readLatestSubmissionApi(route,historyId);}catch(apiError){record=await readLatestSubmission(route);}
+          var record;try{record=await readLatestSubmissionApi(route,historyId);}catch(apiError){if(historyId)throw apiError;record=await readLatestSubmission(route);}
           if(historyPanel)loadSubmissionHistory(route,historyPanel,false);
           if(record&&record.id!==previousId){lastRecord=record;renderSubmissionResult(status,record);if(!record.pending)return;}
           else{setSubmissionStatusClass(status,'is-loading');status.textContent='Codeforces 已接收代码，正在等待提交记录和评测结果…';}
@@ -1510,7 +1531,7 @@ export function buildLocalizationClientScript(options: LocalizationOptions): str
             return submitThroughOfficialEdge({requestId:requestId,submitPath:route.submitPath,contestId:route.contestId,index:route.index,programTypeId:language.value,language:language.options[language.selectedIndex]&&language.options[language.selectedIndex].text||'',previousSubmissionId:previousId,source:source}).then(function(response){return {response:response,previousId:previousId,historyId:response.history&&response.history.id||requestId};});
           }).then(function(result){
             var response=result.response;
-            var message=readSubmitError(String(response.html||''),Number(response.status||200));if(message) throw new Error(message);
+            var submitError=submissionResultError(response);if(submitError) throw submitError;
             var responseRecord=parseSubmissionRows(String(response.html||''),route)[0]||null;
             status.className='cf-inline-submit-status is-loading';status.textContent='Codeforces 已接收代码，正在等待评测结果…';
             if(responseRecord&&responseRecord.id!==result.previousId)renderSubmissionResult(status,responseRecord);

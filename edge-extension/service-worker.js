@@ -1,18 +1,30 @@
 const PORTS = Array.from({ length: 10 }, (_, index) => 27121 + index);
 const BRIDGE_PATH = '/cf-inline-edge-bridge';
-const BRIDGE_PROTOCOL = 3;
+const BRIDGE_PROTOCOL = 5;
 const EXECUTION_TAB_URL = 'https://codeforces.com/#__cf_inline_bridge';
+const MAX_CONCURRENT_BROWSER_REQUESTS = 8;
 const CODEFORCES_TAB_PATTERNS = [
   'https://codeforces.com/*',
   'https://m1.codeforces.com/*',
   'https://m2.codeforces.com/*',
   'https://m3.codeforces.com/*'
 ];
-let socket;
-let heartbeat;
+// Keep one WebSocket per possible VS Code bridge port. VS Code extensions run
+// once per window, so another window (or a host that is still shutting down)
+// may already own the first port. Connecting only to the first live port leaves
+// every other window waiting forever even though the Edge extension is active.
+const sockets = new Map();
+const heartbeats = new Map();
+const reconnectTimers = new Map();
 let executionTabId;
 let executionTabOwned = false;
+let executionTabPromise;
 let sessionPublishTimer;
+let activeBrowserRequests = 0;
+let submissionPending = false;
+let submissionTail = Promise.resolve();
+const browserRequestQueue = [];
+const requestIdleWaiters = [];
 
 function sendBridgeMessage(channel, message) {
   if (!channel || channel.readyState !== WebSocket.OPEN) return false;
@@ -53,28 +65,25 @@ function isScriptAccessError(error) {
 }
 
 function connect() {
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
-  tryPort(0);
+  PORTS.forEach((port) => connectPort(port));
 }
 
-function tryPort(index) {
-  if (index >= PORTS.length) {
-    setTimeout(connect, 1500);
-    return;
-  }
-  const candidate = new WebSocket(`ws://127.0.0.1:${PORTS[index]}${BRIDGE_PATH}`);
-  // Record CONNECTING sockets as well as OPEN sockets. Extension startup,
-  // alarms and content-script wakeups can otherwise start several parallel
-  // port scans before the first WebSocket reaches onopen. Those connections
-  // then replace one another and interrupt an active login or page request.
-  socket = candidate;
+function connectPort(port) {
+  const current = sockets.get(port);
+  if (current && (current.readyState === WebSocket.OPEN || current.readyState === WebSocket.CONNECTING)) return;
+  clearTimeout(reconnectTimers.get(port));
+  reconnectTimers.delete(port);
+  const candidate = new WebSocket(`ws://127.0.0.1:${port}${BRIDGE_PATH}`);
+  // Record CONNECTING sockets before onopen. Startup alarms and content-script
+  // wakeups can otherwise create parallel reconnect chains for the same port.
+  sockets.set(port, candidate);
   let opened = false;
   candidate.onopen = () => {
     opened = true;
-    clearInterval(heartbeat);
-    heartbeat = setInterval(() => {
+    clearInterval(heartbeats.get(port));
+    heartbeats.set(port, setInterval(() => {
       sendBridgeMessage(candidate, { type: 'heartbeat' });
-    }, 20000);
+    }, 20000));
     chrome.action.setBadgeText({ text: 'ON' });
     chrome.action.setBadgeBackgroundColor({ color: '#16883f' });
     // Confirm the bridge protocol immediately. Reading cookies and inspecting
@@ -92,31 +101,42 @@ function tryPort(index) {
   candidate.onmessage = (event) => handleMessage(candidate, event.data);
   candidate.onerror = () => undefined;
   candidate.onclose = () => {
-    if (socket !== candidate) return;
-    socket = undefined;
-    clearInterval(heartbeat);
-    chrome.action.setBadgeText({ text: 'OFF' });
-    chrome.action.setBadgeBackgroundColor({ color: '#b3261e' });
-    if (opened) setTimeout(connect, 1000);
-    else tryPort(index + 1);
+    if (sockets.get(port) !== candidate) return;
+    sockets.delete(port);
+    clearInterval(heartbeats.get(port));
+    heartbeats.delete(port);
+    if (![...sockets.values()].some((channel) => channel.readyState === WebSocket.OPEN)) {
+      chrome.action.setBadgeText({ text: 'OFF' });
+      chrome.action.setBadgeBackgroundColor({ color: '#b3261e' });
+    }
+    const timer = setTimeout(() => {
+      reconnectTimers.delete(port);
+      connectPort(port);
+    }, opened ? 1000 : 5000);
+    reconnectTimers.set(port, timer);
   };
 }
 
-async function publishSession(channel = socket, type = 'sessionState') {
-  if (!channel || channel.readyState !== WebSocket.OPEN) return;
+async function publishSession(channel, type = 'sessionState') {
+  const channels = channel
+    ? [channel]
+    : [...sockets.values()].filter((item) => item.readyState === WebSocket.OPEN);
+  if (channels.length === 0) return;
   try {
     const cookies = await codeforcesCookies();
     const cookieValid = cookies.some((cookie) => cookie.name === 'X-User-Sha1' && /^[0-9a-f]{40}$/i.test(cookie.value) && !/^0+$/.test(cookie.value));
-    const pageValid = !!(await findAuthenticatedTab());
-    sendBridgeMessage(channel, {
+    const pageValid = cookieValid ? false : !!(await findAuthenticatedTab());
+    const message = {
       type,
       protocol: BRIDGE_PROTOCOL,
       cookies: exportedCookies(cookies),
       userAgent: navigator.userAgent,
       valid: cookieValid || pageValid
-    });
+    };
+    channels.forEach((item) => sendBridgeMessage(item, message));
   } catch (error) {
-    sendBridgeMessage(channel, { type, protocol: BRIDGE_PROTOCOL, valid: false, error: error instanceof Error ? error.message : String(error) });
+    const message = { type, protocol: BRIDGE_PROTOCOL, valid: false, error: error instanceof Error ? error.message : String(error) };
+    channels.forEach((item) => sendBridgeMessage(item, message));
   }
 }
 
@@ -146,9 +166,52 @@ async function runTask(action, payload, progress) {
     await discardExecutionTab(executionTabId);
     return { reset: true };
   }
-  if (action === 'request') return browserRequest(payload);
-  if (action === 'submit') return submitSolution(payload, progress);
+  if (action === 'request') return scheduleBrowserRequest(payload);
+  if (action === 'submit') return scheduleSubmission(payload, progress);
   throw new Error(`不支持的桥接任务：${action}`);
+}
+
+function scheduleBrowserRequest(payload) {
+  return new Promise((resolve, reject) => {
+    browserRequestQueue.push({ payload, priority: Number(payload?.priority) || 0, resolve, reject });
+    browserRequestQueue.sort((left, right) => right.priority - left.priority);
+    pumpBrowserRequests();
+  });
+}
+
+function pumpBrowserRequests() {
+  if (submissionPending) return;
+  while (activeBrowserRequests < MAX_CONCURRENT_BROWSER_REQUESTS && browserRequestQueue.length) {
+    const item = browserRequestQueue.shift();
+    activeBrowserRequests += 1;
+    browserRequest(item.payload).then(item.resolve, item.reject).finally(() => {
+      activeBrowserRequests -= 1;
+      if (activeBrowserRequests === 0) {
+        while (requestIdleWaiters.length) requestIdleWaiters.shift()();
+      }
+      pumpBrowserRequests();
+    });
+  }
+}
+
+function waitForBrowserRequestsToFinish() {
+  if (activeBrowserRequests === 0) return Promise.resolve();
+  return new Promise((resolve) => requestIdleWaiters.push(resolve));
+}
+
+function scheduleSubmission(payload, progress) {
+  const scheduled = submissionTail.catch(() => undefined).then(async () => {
+    submissionPending = true;
+    await waitForBrowserRequestsToFinish();
+    try {
+      return await performSubmission(payload, progress);
+    } finally {
+      submissionPending = false;
+      pumpBrowserRequests();
+    }
+  });
+  submissionTail = scheduled.catch(() => undefined);
+  return scheduled;
 }
 
 async function minimizeCodeforcesWindow() {
@@ -219,7 +282,7 @@ async function authenticate(interactive, progress) {
   while (Date.now() - started < (interactive ? 10 * 60_000 : 20_000)) {
     const cookies = await codeforcesCookies();
     const cookieValid = cookies.some((cookie) => cookie.name === 'X-User-Sha1' && /^[0-9a-f]{40}$/i.test(cookie.value) && !/^0+$/.test(cookie.value));
-    const pageValid = !!(await findAuthenticatedTab());
+    const pageValid = cookieValid ? false : !!(await findAuthenticatedTab());
     if (cookieValid || pageValid) {
       progress('已读取日常 Edge 中的 Codeforces 登录状态');
       return { cookies: exportedCookies(cookies), userAgent: navigator.userAgent, valid: true };
@@ -259,38 +322,41 @@ async function clearExecutionTab() {
 }
 
 async function ensureExecutionTab(active = false, forceNew = false) {
-  const savedTabId = await restoreExecutionTab();
-  if (savedTabId && !forceNew) {
-    try {
-      const cached = await chrome.tabs.get(savedTabId);
-      if (cached.id && isAuthorizedCodeforcesUrl(cached.url) && !isLoginUrl(cached.url)) {
-        return cached;
-      }
-    } catch { /* the cached tab was closed */ }
-    await clearExecutionTab();
-  }
-  if (!forceNew) {
-    const tabs = await chrome.tabs.query({ url: CODEFORCES_TAB_PATTERNS });
-    const usable = tabs
-      .filter((tab) => tab.id && isAuthorizedCodeforcesUrl(tab.url) && !isLoginUrl(tab.url))
-      .sort((left, right) => Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0))[0];
-    if (usable) {
-      await rememberExecutionTab(usable.id, false);
-      return usable;
+  if (executionTabPromise) return executionTabPromise;
+  const pending = (async () => {
+    const savedTabId = await restoreExecutionTab();
+    if (forceNew && savedTabId) await discardExecutionTab(savedTabId);
+    else if (savedTabId) {
+      try {
+        const cached = await chrome.tabs.get(savedTabId);
+        // Only reuse a tab created and owned by this extension. Daily tabs are
+        // used for login detection only and are never navigated or scripted as
+        // the request/submission workspace.
+        if (executionTabOwned && cached.id && isAuthorizedCodeforcesUrl(cached.url) && !isLoginUrl(cached.url)) {
+          return cached;
+        }
+      } catch { /* the cached tab was closed */ }
+      await clearExecutionTab();
     }
+    const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+    let tab;
+    if (windows.length) {
+      tab = await chrome.tabs.create({ windowId: windows[0].id, url: EXECUTION_TAB_URL, active });
+    } else {
+      const created = await chrome.windows.create({ url: EXECUTION_TAB_URL, focused: active, type: 'normal' });
+      tab = created.tabs?.[0];
+    }
+    if (!tab?.id) throw new Error('无法创建 Codeforces 后台标签页');
+    await rememberExecutionTab(tab.id, true);
+    await waitForTab(tab.id, 20000);
+    return tab;
+  })();
+  executionTabPromise = pending;
+  try {
+    return await pending;
+  } finally {
+    if (executionTabPromise === pending) executionTabPromise = undefined;
   }
-  const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
-  let tab;
-  if (windows.length) {
-    tab = await chrome.tabs.create({ windowId: windows[0].id, url: EXECUTION_TAB_URL, active });
-  } else {
-    const created = await chrome.windows.create({ url: EXECUTION_TAB_URL, focused: active, type: 'normal' });
-    tab = created.tabs?.[0];
-  }
-  if (!tab?.id) throw new Error('无法创建 Codeforces 后台标签页');
-  await rememberExecutionTab(tab.id, true);
-  await waitForTab(tab.id, 20000);
-  return tab;
 }
 
 async function discardExecutionTab(tabId) {
@@ -304,6 +370,11 @@ async function discardExecutionTab(tabId) {
   } catch { /* already closed */ }
 }
 
+async function releaseExecutionTabForUser(tabId) {
+  if (tabId !== executionTabId) return;
+  await clearExecutionTab();
+}
+
 async function browserRequest(request) {
   const timeoutMs = Math.max(10000, Number(request.timeoutMs) || 30000);
   const retryable = /^(?:GET|HEAD)$/i.test(String(request.method || 'GET'));
@@ -311,11 +382,12 @@ async function browserRequest(request) {
     return await executeBrowserRequest(request, timeoutMs);
   } catch (error) {
     if (!retryable || !isScriptAccessError(error)) throw error;
-    // A cached tab may have navigated to an internal/unapproved page between
-    // selection and script injection. Discard it and retry one read-only
-    // request in a newly selected authorized Codeforces tab.
-    await discardExecutionTab(executionTabId);
-    return executeBrowserRequest(request, timeoutMs, true);
+    // Several resource requests may observe the same failed tab together.
+    // Only the first one may discard it; later retries reuse the replacement
+    // instead of repeatedly closing each other's freshly created workspace.
+    const failedTabId = Number(error?.executionTabId) || 0;
+    if (failedTabId && executionTabId === failedTabId) await discardExecutionTab(failedTabId);
+    return executeBrowserRequest(request, timeoutMs);
   }
 }
 
@@ -330,7 +402,7 @@ async function executeBrowserRequest(request, timeoutMs, forceNew = false) {
   try {
     injection = await withTimeout(chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      world: 'MAIN',
+      world: 'ISOLATED',
       func: async (input) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), input.timeoutMs || 30000);
@@ -352,7 +424,9 @@ async function executeBrowserRequest(request, timeoutMs, forceNew = false) {
   } catch (error) {
     const current = await chrome.tabs.get(tab.id).catch(() => undefined);
     const targetUrl = String(current?.url || fresh.url || '未知网址');
-    throw new Error(`${error instanceof Error ? error.message : String(error)}（执行标签页：${targetUrl}）`);
+    const wrapped = new Error(`${error instanceof Error ? error.message : String(error)}（执行标签页：${targetUrl}）`);
+    wrapped.executionTabId = tab.id;
+    throw wrapped;
   }
   const [{ result }] = injection;
   if (!result) throw new Error('日常 Edge 页面没有返回请求结果');
@@ -369,79 +443,153 @@ function withTimeout(promise, timeoutMs, message) {
   });
 }
 
-async function submitSolution(request, progress) {
-  progress('正在日常 Edge 中打开 Codeforces 官方提交页面…');
-  const tab = await chrome.tabs.create({ url: request.url, active: true });
-  await waitForTab(tab.id, 60000);
-  const originalUrl = tab.url || request.url;
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id }, world: 'MAIN',
-    func: (input) => {
-      const form = document.querySelector('form.submit-form');
-      const text = String(document.body?.innerText || '');
-      if (!form) {
-        if (/complete the anti-bot verification|Just a moment|Checking your browser/i.test(text + document.title))
-          throw new Error('请在当前 Edge 标签页完成反机器人验证后重新提交');
-        if (/^\/enter(?:\/|$)/i.test(location.pathname)) throw new Error('Codeforces 登录状态已失效，请重新登录');
-        throw new Error('Codeforces 官方提交页面未找到提交表单');
-      }
-      const source = input.source;
-      const set = (name, value) => {
-        let control = form.querySelector(`[name="${name}"]`);
-        if (!control) { control = document.createElement('input'); control.type = 'hidden'; control.name = name; form.appendChild(control); }
-        control.value = String(value);
-      };
-      const csrf = form.querySelector('input[name="csrf_token"]')?.value || document.querySelector('meta[name="X-Csrf-Token" i]')?.content || '';
-      const ftaa = String(window._ftaa || ''); const bfaa = String(window._bfaa || '');
-      if (!csrf || !ftaa || !bfaa) throw new Error('Codeforces 官方校验信息尚未就绪，请等待页面加载完成后重新提交');
-      set('csrf_token', csrf); set('ftaa', ftaa); set('bfaa', bfaa); set('action', 'submitSolutionFormSubmitted');
-      set('contestId', input.contestId); set('submittedProblemIndex', input.index); set('submittedProblemCode', input.contestId + input.index);
-      set('programTypeId', input.programTypeId); set('source', source); set('sourceSize', String(new TextEncoder().encode(source).length)); set('tabSize', '4');
-      // Codeforces normally targets a hidden iframe (submitFrameForm). A
-      // sub-frame completion is not reported through chrome.tabs.onUpdated,
-      // which made the bridge wait until its 90-second timeout even though the
-      // official form had already answered. Submit the same official form in
-      // the top-level tab so its real success/error response can be observed.
-      form.removeAttribute('target');
-      form.classList.remove('submitFrameForm');
-      setTimeout(() => HTMLFormElement.prototype.submit.call(form), 500);
-      return { scheduled: true };
-    }, args: [request]
-  });
-  if (!result?.scheduled) throw new Error('Codeforces 官方表单未能发起提交');
-  await waitForNavigation(tab.id, originalUrl, 90000);
-  const [{ result: page }] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: () => ({ html: document.documentElement?.outerHTML || '', url: location.href })
-  });
-  if (!page?.html) throw new Error('Codeforces 官方提交页面没有返回结果');
-  const bytes = new TextEncoder().encode(page.html); let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += 32768) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
-  progress('代码已通过日常 Edge 提交，正在读取 Codeforces 结果…');
-  return { statusCode: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, bodyBase64: btoa(binary), finalUrl: page.url };
+async function performSubmission(request, progress) {
+  progress('正在后台复用 Edge 官方提交页面…');
+  const tab = await ensureExecutionTab(false);
+  const startedAt = Date.now();
+  let handedToUser = false;
+  try {
+    await chrome.tabs.update(tab.id, { url: request.url, active: false });
+    await waitForTab(tab.id, 60000);
+    const submitTab = await chrome.tabs.get(tab.id);
+    const originalUrl = submitTab.url || request.url;
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id }, world: 'MAIN',
+      func: (input) => {
+        const form = document.querySelector('form.submit-form');
+        const text = String(document.body?.innerText || '');
+        if (!form) {
+          if (/complete the anti-bot verification|Just a moment|Checking your browser/i.test(text + document.title))
+            throw new Error('请在当前 Edge 标签页完成反机器人验证后重新提交');
+          if (/^\/enter(?:\/|$)/i.test(location.pathname)) throw new Error('Codeforces 登录状态已失效，请重新登录');
+          throw new Error('Codeforces 官方提交页面未找到提交表单');
+        }
+        const source = input.source;
+        const set = (name, value) => {
+          let control = form.querySelector(`[name="${name}"]`);
+          if (!control) { control = document.createElement('input'); control.type = 'hidden'; control.name = name; form.appendChild(control); }
+          control.value = String(value);
+        };
+        const csrf = form.querySelector('input[name="csrf_token"]')?.value || document.querySelector('meta[name="X-Csrf-Token" i]')?.content || '';
+        const ftaa = String(window._ftaa || ''); const bfaa = String(window._bfaa || '');
+        if (!csrf || !ftaa || !bfaa) throw new Error('Codeforces 官方校验信息尚未就绪，请等待页面加载完成后重新提交');
+        set('csrf_token', csrf); set('ftaa', ftaa); set('bfaa', bfaa); set('action', 'submitSolutionFormSubmitted');
+        set('contestId', input.contestId); set('submittedProblemIndex', input.index); set('submittedProblemCode', input.contestId + input.index);
+        set('programTypeId', input.programTypeId); set('source', source); set('sourceSize', String(new TextEncoder().encode(source).length)); set('tabSize', '4');
+        form.removeAttribute('target');
+        form.classList.remove('submitFrameForm');
+        setTimeout(() => HTMLFormElement.prototype.submit.call(form), 120);
+        return { scheduled: true };
+      }, args: [request]
+    });
+    if (!result?.scheduled) throw new Error('Codeforces 官方表单未能发起提交');
+    await waitForNavigation(tab.id, originalUrl, 90000);
+    const [{ result: page }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: async (input) => {
+        const direct = location.pathname.match(/\/submission\/(\d+)/i);
+        let submissionId = direct?.[1] || '';
+        const routePattern = new RegExp(
+          `(?:/(?:contest|gym)/${input.contestId}/problem/${input.index}|/problemset/problem/${input.contestId}/${input.index}|/group/[^/]+/contest/${input.contestId}/problem/${input.index})(?:/|$)`,
+          'i'
+        );
+        if (!submissionId) {
+          for (const row of document.querySelectorAll('tr')) {
+            const problemMatches = Array.from(row.querySelectorAll('a[href]')).some((link) => {
+              try { return routePattern.test(new URL(link.href, location.href).pathname); } catch { return false; }
+            });
+            if (!problemMatches) continue;
+            const link = row.querySelector('a[href*="/submission/"]');
+            const match = link?.getAttribute('href')?.match(/\/submission\/(\d+)/i);
+            const candidate = row.getAttribute('data-submission-id') || match?.[1] || '';
+            if (/^\d+$/.test(candidate)) { submissionId = candidate; break; }
+          }
+        }
+        if (!submissionId) {
+          const profile = document.querySelector('a[href*="/profile/"]')?.getAttribute('href')?.match(/\/profile\/([^/?#]+)/i);
+          if (profile?.[1]) {
+            try {
+              const response = await fetch(`/api/user.status?handle=${encodeURIComponent(profile[1])}&from=1&count=20`, { cache: 'no-store' });
+              const data = await response.json();
+              const previous = /^\d+$/.test(String(input.previousSubmissionId || '')) ? Number(input.previousSubmissionId) : 0;
+              const candidate = Array.isArray(data?.result) ? data.result.find((entry) =>
+                Number(entry?.id) > previous &&
+                String(entry?.problem?.contestId || '') === String(input.contestId) &&
+                String(entry?.problem?.index || '').toUpperCase() === String(input.index).toUpperCase() &&
+                Number(entry?.creationTimeSeconds) * 1000 >= Number(input.startedAt) - 90000
+              ) : undefined;
+              if (candidate && /^\d+$/.test(String(candidate.id))) submissionId = String(candidate.id);
+            } catch { /* the VS Code poller can still resolve the id */ }
+          }
+        }
+        return { html: document.documentElement?.outerHTML || '', url: location.href, submissionId };
+      }, args: [{ ...request, startedAt }]
+    });
+    if (!page?.html) throw new Error('Codeforces 官方提交页面没有返回结果');
+    const bytes = new TextEncoder().encode(page.html); let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 32768) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+    progress('代码已通过日常 Edge 提交，正在读取 Codeforces 结果…');
+    const headers = { 'content-type': 'text/html; charset=utf-8' };
+    if (/^\d+$/.test(String(page.submissionId || ''))) headers['x-cf-inline-submission-id'] = String(page.submissionId);
+    return { statusCode: 200, headers, bodyBase64: btoa(binary), finalUrl: page.url };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/反机器人验证|登录状态已失效|未找到提交表单/i.test(message)) {
+      handedToUser = true;
+      await releaseExecutionTabForUser(tab.id);
+      await chrome.tabs.update(tab.id, { active: true }).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    if (!handedToUser && executionTabId === tab.id) {
+      await chrome.tabs.update(tab.id, { url: EXECUTION_TAB_URL, active: false }).catch(() => undefined);
+      await waitForTab(tab.id, 20000).catch(() => undefined);
+    }
+  }
 }
 
 function waitForNavigation(tabId, originalUrl, timeoutMs) {
   return new Promise((resolve, reject) => {
     let started = false;
-    const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error('等待 Codeforces 官方提交结果超时')); }, timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      chrome.tabs.onRemoved.removeListener(removed);
+    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('等待 Codeforces 官方提交结果超时')); }, timeoutMs);
     function listener(id, info, tab) {
       if (id !== tabId) return;
       if (info.status === 'loading' || (info.url && info.url !== originalUrl)) started = true;
-      if (started && info.status === 'complete') { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve(tab); }
+      if (started && info.status === 'complete') { cleanup(); resolve(tab); }
     }
+    function removed(id) { if (id === tabId) { cleanup(); reject(new Error('Edge 后台执行页已被关闭')); } }
     chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.onRemoved.addListener(removed);
   });
 }
 
 function waitForTab(tabId, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error('Edge 页面加载超时')); }, timeoutMs);
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      chrome.tabs.onRemoved.removeListener(removed);
+    };
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      error ? reject(error) : resolve();
+    };
+    const timer = setTimeout(() => finish(new Error('Edge 页面加载超时')), timeoutMs);
     function listener(id, info) {
-      if (id === tabId && info.status === 'complete') { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve(); }
+      if (id === tabId && info.status === 'complete') finish();
     }
-    chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve(); } }).catch(() => undefined);
+    function removed(id) { if (id === tabId) finish(new Error('Edge 后台执行页已被关闭')); }
+    chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') finish(); }).catch((error) => finish(error instanceof Error ? error : new Error(String(error))));
     chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.onRemoved.addListener(removed);
   });
 }
 

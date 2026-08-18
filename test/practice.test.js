@@ -103,3 +103,17 @@ test('persists bounded submission history without storing source code', async ()
   assert.equal(store.list(undefined, undefined, 100).length, 100);
   assert.ok(store.list(1, 'b', 100).every((record) => record.contestId === 1 && record.index === 'B'));
 });
+
+test('recovers histories falsely failed by the unrelated collapsed-state warning', async () => {
+  const memory = new MemoryMemento();
+  await memory.update('cfInline.submissionHistory.v1', [{
+    id: 'submit-history-old-warning', contestId: 1, index: 'A', programTypeId: '89',
+    language: 'GNU C++23', status: 'failed',
+    message: 'Codeforces 返回：Failed to save collapsed state.',
+    createdAt: Date.now(), updatedAt: Date.now(),
+  }]);
+  const restored = new SubmissionHistoryStore(memory).get('submit-history-old-warning');
+  assert.equal(restored.status, 'unknown');
+  assert.doesNotMatch(restored.message, /Failed to save collapsed state/i);
+  assert.match(restored.message, /重新查询 Codeforces/);
+});

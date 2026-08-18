@@ -691,6 +691,12 @@ test('classifies official submission responses without turning success into an e
   ));
   assert.equal(failed.status, 'failed');
   assert.match(failed.message, /Source should differ/);
+  const unrelatedPageError = classifyCodeforcesSubmissionResponse(response(
+    '<script>Codeforces.showError("Failed to save collapsed state.")</script><form class="submit-form"></form>',
+    'https://codeforces.com/contest/1/submit'
+  ));
+  assert.equal(unrelatedPageError.status, 'unknown');
+  assert.doesNotMatch(unrelatedPageError.message, /collapsed state/i);
   assert.equal(formatSubmissionVerdict('WRONG_ANSWER'), '答案错误');
   assert.equal(formatSubmissionVerdict('OK'), '通过');
 });
@@ -704,8 +710,15 @@ test('persists protected submission history and updates it from verdict polling'
     async update(id, patch) { const record = records.find((item) => item.id === id); if (!record) return undefined; Object.assign(record, patch, { updatedAt: Date.now() }); return { ...record }; },
   };
   const transport = new FakeTransport((request) => {
-    if (request.method === 'BROWSER_SUBMIT') return response('<script>Codeforces.showMessage("Solution to the problem A has been submitted successfully")</script>', 'https://codeforces.com/contest/1/my');
-    if (request.url.includes('/api/user.status')) return response(JSON.stringify({ status: 'OK', result: [{ id: 101, creationTimeSeconds: Math.floor(Date.now() / 1000), verdict: 'OK', timeConsumedMillis: 31, memoryConsumedBytes: 4096, problem: { contestId: 1, index: 'A' } }] }), request.url);
+    if (request.method === 'BROWSER_SUBMIT') {
+      const accepted = response('<script>Codeforces.showError("Failed to save collapsed state.")</script>', 'https://codeforces.com/contest/1/my');
+      accepted.headers['x-cf-inline-submission-id'] = '101';
+      return accepted;
+    }
+    if (request.url.includes('/api/user.status')) return response(JSON.stringify({ status: 'OK', result: [
+      { id: 102, creationTimeSeconds: Math.floor(Date.now() / 1000), verdict: 'WRONG_ANSWER', problem: { contestId: 1, index: 'A' } },
+      { id: 101, creationTimeSeconds: Math.floor(Date.now() / 1000), verdict: 'OK', timeConsumedMillis: 31, memoryConsumedBytes: 4096, problem: { contestId: 1, index: 'A' } },
+    ] }), request.url);
     return response('<nav><a href="/profile/tester">tester</a><a href="/logout">Logout</a></nav>', request.url);
   });
   const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/contest/1/problem/A', port: 0, submissionHistory: history });
@@ -719,6 +732,9 @@ test('persists protected submission history and updates it from verdict polling'
   });
   const submittedResult = JSON.parse(submitted.body.toString('utf8'));
   assert.equal(submittedResult.history.status, 'judging');
+  assert.equal(submittedResult.history.submissionId, '101');
+  assert.doesNotMatch(submittedResult.history.message, /collapsed state/i);
+  assert.equal(transport.submissions[0].previousSubmissionId, '100');
   assert.equal(records[0].source, undefined);
 
   const rejectedHistory = await localRequest(`${proxy.origin}/__cf_inline/submission-history?contestId=1&index=A`);
@@ -728,6 +744,7 @@ test('persists protected submission history and updates it from verdict polling'
   const polled = await localRequest(`${proxy.origin}/__cf_inline/submission-status?contestId=1&index=A&historyId=submit-history-101`, { headers: { 'X-CF-Inline': 'submission-status' } });
   const pollResult = JSON.parse(polled.body.toString('utf8'));
   assert.equal(pollResult.history.status, 'verdict');
+  assert.equal(pollResult.history.submissionId, '101');
   assert.equal(pollResult.history.verdict, 'OK');
   assert.match(pollResult.history.message, /通过/);
 });
@@ -1030,6 +1047,24 @@ test('offers a real Edge reconnect when script permission fails while the sessio
   assert.match(html, /id="relogin"/);
   assert.match(html, /重新连接 Edge/);
   assert.match(html, /if\(!reconnectRequired&&!requestedLogin\)return/);
+});
+
+test('offers Edge reconnect when the bridge extension temporarily stops answering', async (t) => {
+  const proxy = new CfProxy({ baseUrl: 'https://codeforces.com', defaultPath: '/groups/my', port: 0 });
+  const transport = new FakeTransport(() => {
+    throw new Error('未检测到配套 Edge 扩展，请确认已经安装并启用');
+  });
+  proxy.attachBrowserSession([sessionCookie()], 'Edge test', transport);
+  await proxy.start();
+  t.after(() => proxy.stop());
+
+  const page = await localRequest(`${proxy.origin}/groups/my`);
+  const html = page.body.toString('utf8');
+  assert.equal(page.statusCode, 502);
+  assert.equal(proxy.state().sessionReady, true);
+  assert.match(html, /var reconnectRequired=true/);
+  assert.match(html, /重新连接 Edge/);
+  assert.match(html, /Edge 扩展的执行页或权限状态异常/);
 });
 
 test('accepts a protected local relogin request and publishes progress state', async (t) => {
